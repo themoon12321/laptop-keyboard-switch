@@ -6,6 +6,8 @@
 ;          identity check / renumber after resume / panic / chord / 100 toggles
 ; =====================================================================
 #Requires AutoHotkey v2.0
+#Warn All, StdOut
+#Warn LocalSameAsGlobal, Off
 #SingleInstance Off
 #include ..\app\lib\KbCore.ahk
 
@@ -39,6 +41,10 @@ class FakeAHI {
         this.sent := []
         this.failIds := Map()
         this.stateCalls := []
+        this.failUnsubIds := Map()
+        this.failRelease := false
+        this.failSend := false
+        this.filterEnabled := false
     }
     AddDev(id, handle, isMouse := false) {
         this.devs[id] := {id: id, Handle: handle, IsMouse: isMouse}
@@ -53,20 +59,27 @@ class FakeAHI {
         if (this.failIds.Has(id))
             throw Error("simulated subscribe failure id=" id)
         this.subs[id] := cb
+        this.filterEnabled := true ; actual AHI Subscribe enables its context
     }
     UnsubscribeKeyboard(id) {
-        if (!this.subs.Has(id))
-            throw Error("not subscribed id=" id)
-        this.subs.Delete(id)
+        if this.failUnsubIds.Has(id)
+            throw Error("simulated cleanup failure")
+        if this.subs.Has(id)
+            this.subs.Delete(id)
     }
     SendKeyEvent(id, code, state) {
+        if this.failSend
+            throw Error("simulated output failure")
         this.sent.Push({id: id, code: code, state: state})
     }
     SetState(s) {
+        if (!s && this.failRelease)
+            throw Error("simulated release failure")
         this.stateCalls.Push(s)
+        this.filterEnabled := s
     }
     Stroke(id, code, state) {
-        if (this.subs.Has(id))
+        if (this.filterEnabled && this.subs.Has(id))
             this.subs[id].Call(code, state)
     }
     LastState() {
@@ -118,8 +131,9 @@ c3 := NewCore(f3)
 c3.Identify(f3.GetDeviceList(), [])
 ok3 := c3.Block()
 Check(ok3 && f3.subs.Count = 1 && f3.subs.Has(1) && !f3.subs.Has(2), "T3 block subscribes internal only")
-; v6 架构红线: 全程禁止 SetState(true) —— 那会留下可残留的全局拦截位
-Check(f3.LastState() != 1, "T3b Block must NOT call SetState(true)")
+; The wrapper activates context filters inside Subscribe; explicit SetState(true)
+; is unnecessary, but omitting it does not prove anything about other devices.
+Check(f3.LastState() != 1 && f3.filterEnabled, "T3b subscription activates only the fake context without redundant SetState(true)")
 Prog("T3 done")
 
 Prog("T4 start")
@@ -289,6 +303,48 @@ Check(n16b = 0 && c16b.ids.Length = 0, "T16b Bluetooth-only interactive result i
 Prog("T16b done")
 
 Prog("ALL done")
+; Failed cleanup must remain visible and must prevent any re-subscription.
+f17 := FakeAHI()
+f17.AddDev(1, "ACPI\internal")
+c17 := NewCore(f17)
+c17.Identify(f17.GetDeviceList())
+c17.Block()
+f17.failUnsubIds[1] := true
+Check(!c17.Unblock() && c17.subs.Has(1) && c17.mode = "error", "T17 cleanup failure retains ownership and reports unknown state")
+Check(!c17.Block() && !f17.filterEnabled, "T17b stale subscription cannot reactivate filters")
+f17.failUnsubIds.Clear()
+Check(c17.Unblock() && c17.subs.Count = 0, "T17c retry can finish cleanup")
+f17.failRelease := true
+Check(!c17.Unblock() && c17.mode = "error", "T18 failed fail-open is reported")
+
+f19 := FakeAHI()
+f19.AddDev(1, "ACPI\fragment1")
+f19.AddDev(2, "ACPI\fragment2")
+f19.AddDev(3, "USB\external")
+c19 := NewCore(f19)
+Check(c19.Identify(f19.GetDeviceList(), ["ACPI\fragment1"]) = 2, "T19 partial cache still includes all internal fragments")
+c19.SetChord(Map(29, true), 37)
+c19.SetExempt(Map(29, true, 37, true))
+c19.Block()
+f19.Stroke(1, 29, 1)
+f19.Stroke(1, 37, 1)
+Check(f19.sent.Length = 0, "T20 chord keys cannot leak through exemptions")
+f19.devs[1].Handle := "USB\external-reused-id"
+f19.Stroke(1, 30, 1)
+Check(c19.needReidentify && f19.SentCount(30, 1) = 1, "T21 reused device ID passes input and requests re-identification")
+
+f22 := FakeAHI()
+f22.AddDev(1, "ACPI\internal")
+c22 := NewCore(f22)
+c22.Identify(f22.GetDeviceList())
+c22.ConfigureGestures([{source: 45, target: 44, mode: "hold", delay: 600}], true)
+c22.Unblock()
+f22.failSend := true
+f22.Stroke(1, 30, 1)
+Check(c22.needStop && f22.subs.Count = 1, "T22 output failure schedules release outside the driver callback")
+c22.TickGestures()
+Check(c22.mode = "pass" && f22.subs.Count = 0 && !f22.filterEnabled, "T22b deferred release stops failed gesture processing")
+
 g_msgs .= "`nTOTAL: " g_pass " passed, " g_fail " failed`n"
 FileAppend(g_msgs, outFile, "UTF-8")
 ExitApp(g_fail > 0 ? 1 : 0)

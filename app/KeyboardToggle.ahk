@@ -1,5 +1,5 @@
 ﻿; =====================================================================
-;  笔记本内置键盘 热开关 v5
+;  笔记本内置键盘 热开关 + 内置键盘坏键替代
 ;
 ;  核心引擎见 lib\KbCore.ahk (整设备订阅 + 豁免重注入 + 幽灵键修复)
 ;  本文件负责: 单实例、识别 UI、托盘/面板、快捷键、看门狗、应急释放
@@ -12,14 +12,17 @@
 ;
 ;  安全设计:
 ;    - 退出/应急 都会: SetState(false) + 退订 + 补发修饰键抬起
-;    - 启动时清理所有旧的守护进程 (含旧版本残留)
+;    - 命名互斥锁防重复启动，PID 只用于命令转发并核实所属脚本
 ;    - 设备身份(编号+句柄)订阅前核验, 不符绝不订阅
 ; =====================================================================
 #Requires AutoHotkey v2.0
+#Warn All, StdOut
+#Warn LocalSameAsGlobal, Off
 #SingleInstance Off
 Persistent
 #include Lib\AutoHotInterception.ahk
 #include lib\KbCore.ahk
+#include Lib\GestureSettings.ahk
 
 global WM_APP_CMD   := 0x8000
 global CMD_TOGGLE   := 1
@@ -41,6 +44,7 @@ global g_ctlStatus  := 0
 global g_ctlHk      := 0
 global g_ctlExempt  := 0
 global g_ctlAuto    := 0
+global g_ctlGestures := 0
 global g_scanGui    := 0
 global g_scanLb     := 0
 global g_scanMap    := Map()
@@ -48,10 +52,30 @@ global g_scanOrder  := []
 global g_scanDirty  := 0
 global g_watchFails := 0
 global g_lastInteractive := 0
-global g_pendingInit := ""
 global g_tick := 0
-global g_needReval := 0
 global g_exiting := false
+global g_ready := false
+global g_desiredBlocked := false
+global gestureFile := A_ScriptDir "\KeyGestures.ini"
+global g_gestureRules := []
+global g_gesturesEnabled := false
+global g_settingsWindow := 0
+global g_instanceMutex := 0
+
+AcquireDaemonLock() {
+    global g_instanceMutex
+    pathHash := 2166136261
+    loop parse StrLower(A_ScriptFullPath)
+        pathHash := ((pathHash ^ Ord(A_LoopField)) * 16777619) & 0xFFFFFFFF
+    name := "Local\LapKeySwitch_" Format("{:08X}", pathHash)
+    g_instanceMutex := DllCall("CreateMutexW", "Ptr", 0, "Int", 0, "Str", name, "Ptr")
+    return g_instanceMutex && A_LastError != 183
+}
+
+IsOurCommandLine(command) {
+    escaped := RegExReplace(A_ScriptFullPath, "([\\.*+?{}\[\]()|^$])", "\$1")
+    return RegExMatch(command, 'i)(?:^|[\s"])' escaped '(?=["\s]|$)') != 0
+}
 
 RotateLog() {
     global logFile
@@ -73,8 +97,12 @@ ReadDaemonPid() {
     global pidFile
     try {
         pid := Integer(Trim(FileRead(pidFile)))
-        if (pid > 0 && ProcessExist(pid))
-            return pid
+        if (pid > 0 && ProcessExist(pid)) {
+            wmi := ComObject("WbemScripting.SWbemLocator").ConnectServer()
+            for process in wmi.ExecQuery("SELECT Name, CommandLine FROM Win32_Process WHERE ProcessId=" pid)
+                if (InStr(process.Name, "AutoHotkey") = 1 && IsOurCommandLine(process.CommandLine))
+                    return pid
+        }
     }
     return 0
 }
@@ -96,7 +124,10 @@ WriteDaemonPid() {
 
 ClearDaemonPid() {
     global pidFile
-    try FileDelete(pidFile)
+    try {
+        if (Integer(Trim(FileRead(pidFile))) = ProcessExist())
+            FileDelete(pidFile)
+    }
 }
 
 ; 杀掉本工具的全部进程 (守护 + 遗留 CLI 助手), 排除自己
@@ -108,7 +139,7 @@ KillDaemons() {
             if (p.ProcessId = me)
                 continue
             cmd := p.CommandLine
-            if (!cmd || !InStr(cmd, A_ScriptName))
+            if (!cmd || !IsOurCommandLine(cmd))
                 continue
             try ProcessClose(p.ProcessId)
         }
@@ -150,6 +181,11 @@ if (A_Args.Length >= 1 && !isDaemonChild) {
             Sleep 300
             ExitApp
         }
+        if (a1 = "status") {
+            TrayTip("键盘开关守护进程未运行", "键盘开关")
+            Sleep 1000
+            ExitApp
+        }
         ; 没有守护进程: 派生一个独立的后台守护实例后立刻退出 (CLI 不阻塞)
         if (a1 = "gui") {
             Run('"' A_AhkPath '" "' A_ScriptFullPath '" --daemon', , "Hide")
@@ -173,8 +209,12 @@ if (isDaemonChild && A_Args.Length >= 1) {
 }
 
 ; ---------------- 守护进程 ----------------
-KillDaemons()
-Sleep 400
+if (!AcquireDaemonLock()) {
+    existing := FindDaemonWindow()
+    if existing
+        PostMessage(WM_APP_CMD, CMD_GUI, 0, existing)
+    ExitApp
+}
 WriteDaemonPid()
 OnMessage(WM_APP_CMD, CmdHandler)
 OnMessage(0x0219, OnDeviceChange)     ; WM_DEVICECHANGE
@@ -189,9 +229,9 @@ catch as e {
     ExitApp
 }
 
-; 启动即安全化: 清掉任何历史残留的全局拦截位 (v5 时代 SetState(true) 的遗留)
+; Best effort: release this context. This cannot repair other driver clients.
 try AHI.SetState(false)
-LogMsg("boot: SetState(false) applied (clear any legacy global filter)")
+LogMsg("boot: context filters disabled before initialization")
 
 core := KbCore(AHI, (s) => LogMsg(s))
 core.SetOnChord((*) => PostMessage(WM_APP_CMD, CMD_TOGGLE, 0, A_ScriptHwnd))
@@ -202,8 +242,23 @@ catch as e {
     ApplyHotkey("^!k")
 }
 core.SetExempt(ExemptMap())
+try {
+    settings := GestureSettings.Load(gestureFile)
+    g_gestureRules := settings.rules
+    g_gesturesEnabled := settings.enabled
+    if !core.ConfigureGestures(g_gestureRules, g_gesturesEnabled)
+        throw Error(core.lastError)
+} catch as e {
+    g_gesturesEnabled := false
+    LogMsg("gesture configuration disabled: " e.Message)
+}
+g_desiredBlocked := IniRead(iniFile, "state", "blocked", "0") = "1"
+if (initState != "") {
+    g_desiredBlocked := initState = "off" ? true : initState = "on" ? false : !g_desiredBlocked
+    IniWrite(g_desiredBlocked ? "1" : "0", iniFile, "state", "blocked")
+}
+g_ready := true
 
-g_pendingInit := initState
 ok := IdentifyFlow(true)
 tries := 0
 while (!ok && tries < 5) {
@@ -220,34 +275,51 @@ if (ok) {
 BuildTray()
 LogMsg("daemon started, ids=" core.ids.Length " blocked=" core.blocked " hotkey=" g_hk)
 SetTimer(OnTick, 2000)
+SetTimer(PumpGestures, 15)
 if (guiStart)
     ShowGui()
 return
 
 ; ---------------- 定时维护 ----------------
+PumpGestures() {
+    global core
+    before := core.mode
+    pendingStop := core.needStop
+    core.TickGestures()
+    if (core.mode != before || pendingStop) {
+        UpdateTrayIcon()
+        UpdateGui()
+        if (core.lastError != "")
+            TrayTip("坏键替代已暂停: " core.lastError, "键盘开关", 3)
+    }
+}
+
 OnTick() {
-    global g_tick, g_needReval, g_watchFails, g_lastInteractive, core
+    global g_tick, g_watchFails, g_lastInteractive, core, g_desiredBlocked, g_scanGui
+    if IsObject(g_scanGui)
+        return
     g_tick++
     ; 已识别: 每 2 秒核验一次设备身份/编号 (开销极小), 设备变化时立即可见
     if (core.ids.Length > 0) {
         r := core.Revalidate()
         if (r = "lost") {
             LogMsg("device identity lost -> re-identify")
-            core.Reset()
+            if !core.Reset() {
+                UpdateTrayIcon()
+                UpdateGui()
+                return
+            }
             if (IdentifyFlow(true)) {
-                if (core.blocked)
-                    SetBlocked(true)
-                else
-                    SetBlocked(false)
+                SetBlocked(g_desiredBlocked, false, false)
             } else {
-                SetBlocked(false)
                 TrayTip("内置键盘设备已变化, 正在重新识别…", "键盘开关", 2)
             }
+            UpdateTrayIcon()
             UpdateGui()
         }
         return
     }
-    ; 未识别: 每 2 秒一次的静默重试; 连续失败后每 5 分钟升级一次交互识别
+    ; 未识别: 每 10 秒静默重试；连续等待后最多每 5 分钟尝试一次识别向导。
     g_watchFails++
     if (g_watchFails >= 4 && A_TickCount - g_lastInteractive > 300000) {
         g_lastInteractive := A_TickCount
@@ -265,10 +337,9 @@ OnTick() {
 }
 
 OnDeviceChange(wParam, lParam, msg, hwnd) {
-    global g_needReval
     ; 设备到达/移除后 1.5 秒做一次核验 (避免枚举未完成的抖动)
     if (wParam = 0x8000 || wParam = 0x8004)
-        SetTimer(() => (g_needReval := 1), -1500)
+        SetTimer(() => OnTick(), -1500)
 }
 
 ; ---------------- 识别流程 ----------------
@@ -427,43 +498,92 @@ CancelClick(st, pg, ctrl, info) {
 }
 
 ApplyPendingState() {
-    global g_pendingInit, iniFile, core
-    if (g_pendingInit != "") {
-        p := g_pendingInit
-        g_pendingInit := ""
-        SetBlocked(p = "off" ? true : p = "on" ? false : !core.blocked)
-        return
-    }
-    SetBlocked(IniRead(iniFile, "state", "blocked", "0") = "1")
+    global g_desiredBlocked
+    SetBlocked(g_desiredBlocked, false, false)
 }
 
 ; ---------------- 状态切换 ----------------
-SetBlocked(block) {
-    global core
-    if (core.ids.Length = 0) {
+SetBlocked(block, notify := true, persist := true) {
+    global core, g_desiredBlocked, iniFile, g_scanGui
+    if IsObject(g_scanGui)
+        EndScan(false)
+    if persist {
+        g_desiredBlocked := block
+        IniWrite(block ? "1" : "0", iniFile, "state", "blocked")
+    }
+    if (block && core.ids.Length = 0) {
         if (!IdentifyFlow(false)) {
-            TrayTip("未识别到内置键盘, 无法切换 (看门狗会继续重试)", "键盘开关", 3)
-            return
+            if notify
+                TrayTip("未识别到内置键盘，已记住目标状态；看门狗会继续重试", "键盘开关", 3)
+            UpdateTrayIcon()
+            UpdateGui()
+            return false
         }
     }
     if (block) {
         if (!core.Block()) {
             ReleaseModifiers()
             LogMsg("BLOCK FAILED: " core.lastError)
-            TrayTip("截断失败: " core.lastError "`n当前状态: 已放行", "键盘开关", 3)
+            if notify
+                TrayTip("截断失败: " core.lastError, "键盘开关", 3)
             UpdateTrayIcon()
             UpdateGui()
-            return
+            return false
         }
     } else {
-        core.Unblock()
+        if !core.Unblock() {
+            LogMsg("RELEASE/REMAP FAILED: " core.lastError)
+            if notify
+                TrayTip("恢复未确认: " core.lastError, "键盘开关", 3)
+            UpdateTrayIcon()
+            UpdateGui()
+            return false
+        }
         ReleaseModifiers()   ; 清除可能的残留按下状态
     }
-    IniWrite(core.blocked ? "1" : "0", iniFile, "state", "blocked")
-    TrayTip(core.blocked ? "内置键盘已截断 (" core.ids.Length " 个设备)`n只保留外接键盘" : "内置键盘已恢复", "键盘开关")
+    if notify
+        TrayTip(core.blocked ? "内置键盘已截断 (" core.ids.Length " 个设备)`n只保留外接键盘" : "内置键盘已恢复", "键盘开关")
     UpdateTrayIcon()
     UpdateGui()
     LogMsg("state -> " (core.blocked ? "blocked" : "allowed") " subs=" core.subs.Count)
+    return true
+}
+
+; ---------------- 坏键替代设置 ----------------
+ShowGestureSettings(*) {
+    global g_settingsWindow, g_gestureRules, g_gesturesEnabled
+    if IsObject(g_settingsWindow) {
+        try {
+            g_settingsWindow.Show()
+            return
+        }
+    }
+    g_settingsWindow := GestureSettingsWindow(g_gestureRules, g_gesturesEnabled, ApplyGestureSettings)
+    g_settingsWindow.Show()
+}
+
+ApplyGestureSettings(rules, enabled) {
+    global core, gestureFile, g_gestureRules, g_gesturesEnabled, g_desiredBlocked
+    KeyGestures.Validate(rules)
+    oldRules := g_gestureRules, oldEnabled := g_gesturesEnabled
+    if !core.ConfigureGestures(rules, enabled)
+        throw Error(core.lastError)
+    try {
+        if (core.ids.Length > 0 && !SetBlocked(g_desiredBlocked, false, false))
+            throw Error(core.lastError)
+        GestureSettings.Save(gestureFile, rules, enabled)
+    } catch as e {
+        core.ConfigureGestures(oldRules, oldEnabled)
+        if core.ids.Length
+            SetBlocked(g_desiredBlocked, false, false)
+        throw e
+    }
+    g_gestureRules := rules.Clone()
+    g_gesturesEnabled := enabled
+    UpdateGui()
+    TrayTip(enabled ? "坏键替代已启用（仅内置键盘）" : "坏键替代已关闭", "键盘开关")
+    LogMsg("gesture settings saved: enabled=" enabled " rules=" rules.Length)
+    return true
 }
 
 ; ---------------- 快捷键 ----------------
@@ -651,19 +771,19 @@ ScanKeysFlow(*) {
         TrayTip("请先恢复内置键盘再扫描, 否则按键无反应", "键盘开关", 3)
         return
     }
-    subOK := true
-    for id in core.ids {
-        try AHI.SubscribeKeyboard(id, false, ScanCbFn)
-        catch
-            subOK := false
-    }
-    if (!subOK) {
-        TrayTip("扫描订阅失败, 见日志", "键盘开关", 3)
+    if IsObject(g_scanGui) {
+        g_scanGui.Show()
         return
     }
     g_scanMap := Map()
     g_scanOrder := []
     g_scanDirty := 0
+    core.onObserve := ScanCbFn
+    if !core.SubscribeMode("observe") {
+        core.onObserve := 0
+        TrayTip("扫描订阅失败, 见日志", "键盘开关", 3)
+        return
+    }
     g_scanGui := Gui("", "扫描内置键盘按键")
     g_scanGui.MarginX := 14
     g_scanGui.MarginY := 12
@@ -678,26 +798,26 @@ ScanKeysFlow(*) {
 }
 
 CancelScan(*) {
-    global AHI, core, g_scanGui
+    EndScan()
+}
+
+EndScan(resume := true) {
+    global core, g_scanGui, g_desiredBlocked
     SetTimer(ScanTimer, 0)
-    for id in core.ids
-        try AHI.UnsubscribeKeyboard(id)
+    core.onObserve := 0
+    core.Stop()
     if (IsObject(g_scanGui)) {
         g_scanGui.Destroy()
         g_scanGui := 0
     }
+    if resume
+        SetBlocked(g_desiredBlocked, false, false)
 }
 
 FinishScan(*) {
     global AHI, core, g_scanGui, g_scanOrder
-    SetTimer(ScanTimer, 0)
-    for id in core.ids
-        try AHI.UnsubscribeKeyboard(id)
     codes := g_scanOrder.Clone()
-    if (IsObject(g_scanGui)) {
-        g_scanGui.Destroy()
-        g_scanGui := 0
-    }
+    EndScan()
     if (codes.Length = 0) {
         TrayTip("没有按任何键, 豁免清单未修改", "键盘开关")
         return
@@ -755,7 +875,7 @@ ClearExempt(*) {
 
 ; ---------------- 面板 ----------------
 ShowGui(*) {
-    global g_gui, g_ctlStatus, g_ctlHk, g_ctlExempt, g_ctlAuto
+    global g_gui, g_ctlStatus, g_ctlHk, g_ctlExempt, g_ctlAuto, g_ctlGestures
     if (!IsObject(g_gui)) {
         g_gui := Gui("", "内置键盘开关")
         g_gui.MarginX := 16
@@ -768,13 +888,15 @@ ShowGui(*) {
         g_gui.AddButton("w330 h34 y+12", "切换内置键盘").OnEvent("Click", (*) => SetBlocked(!core.blocked))
         g_gui.AddButton("w158 h32 y+10 Section", "只留外接").OnEvent("Click", (*) => SetBlocked(true))
         g_gui.AddButton("w158 h32 ys x+14", "恢复内置").OnEvent("Click", (*) => SetBlocked(false))
-        g_gui.AddButton("w158 h32 y+10", "扫描按键(豁免)…").OnEvent("Click", ScanKeysFlow)
+        g_gui.AddButton("xm w158 h32 y+10 Section", "扫描按键(豁免)…").OnEvent("Click", ScanKeysFlow)
         g_gui.AddButton("w158 h32 ys x+14", "自定义快捷键…").OnEvent("Click", CaptureHotkeyFlow)
-        g_gui.AddButton("w158 h32 y+10", "重新识别内置键盘").OnEvent("Click", ReidentifyFlow)
+        g_gui.AddButton("xm w158 h32 y+10 Section", "重新识别内置键盘").OnEvent("Click", ReidentifyFlow)
         g_gui.AddButton("w158 h32 ys x+14", "清除全部豁免").OnEvent("Click", ClearExempt)
-        g_ctlAuto := g_gui.AddCheckBox("w158 h26 y+10 Checked" (IsAutostart() ? 1 : 0), "开机自动启动")
+        g_ctlAuto := g_gui.AddCheckBox("xm w158 h26 y+10 Section Checked" (IsAutostart() ? 1 : 0), "开机自动启动")
         g_ctlAuto.OnEvent("Click", OnAutoClick)
         g_gui.AddButton("w158 h26 ys x+14", "紧急恢复键盘").OnEvent("Click", EmergencyRelease)
+        g_gui.AddButton("xm w330 h34 y+12", "坏键替代设置（长按 / 双击）…").OnEvent("Click", ShowGestureSettings)
+        g_ctlGestures := g_gui.AddText("xm w330 r2 y+8", "")
         g_gui.OnEvent("Close", (g) => g.Hide())
     }
     UpdateGui()
@@ -782,10 +904,13 @@ ShowGui(*) {
 }
 
 UpdateGui(*) {
-    global g_gui, g_ctlStatus, core
+    global g_gui, g_ctlStatus, core, g_ctlGestures, g_gesturesEnabled, g_gestureRules
     if (!IsObject(g_gui))
         return
-    if (core.ids.Length = 0) {
+    if (core.mode = "error") {
+        g_ctlStatus.Text := "内置键盘：释放状态未确认（请紧急恢复）"
+        g_ctlStatus.SetFont("cC00000")
+    } else if (core.ids.Length = 0) {
         g_ctlStatus.Text := "内置键盘：未识别（重试中）"
         g_ctlStatus.SetFont("cB8860B")
     } else if (core.blocked) {
@@ -802,6 +927,9 @@ UpdateGui(*) {
     want := IsAutostart() ? 1 : 0
     if (g_ctlAuto.Value != want)
         g_ctlAuto.Value := want
+    paused := g_gesturesEnabled && core.mode = "pass" && core.ids.Length > 0
+    g_ctlGestures.Text := "坏键替代：" (paused ? "处理已暂停，请重新应用设置" : g_gesturesEnabled ? "已启用，" g_gestureRules.Length " 条规则" : "已关闭")
+        . "`n仅内置键盘；截断期间暂停"
 }
 
 UpdateGuiHkText(*) {
@@ -821,18 +949,23 @@ OnAutoClick(*) {
 
 ; ---------------- 重新识别 / 应急 ----------------
 ReidentifyFlow(*) {
-    global core
-    if (core.blocked)
-        core.Unblock()
-    core.Reset()
+    global core, g_desiredBlocked, g_scanGui
+    if IsObject(g_scanGui)
+        EndScan(false)
+    if !core.Reset() {
+        TrayTip("旧订阅未成功清理，请先紧急恢复", "键盘开关", 3)
+        return
+    }
     IniWrite("", iniFile, "device", "handles")
     IniWrite("", iniFile, "device", "machine")
     if (IdentifyFlow(false)) {
+        SetBlocked(g_desiredBlocked, false, false)
         TrayTip("识别成功: " core.ids.Length " 个内置键盘设备", "键盘开关")
     } else {
         TrayTip("识别失败: " core.lastError "（看门狗会继续重试）", "键盘开关", 3)
     }
     UpdateGui()
+    UpdateTrayIcon()
 }
 
 EmergencyRelease(*) {
@@ -851,6 +984,8 @@ DoCleanup() {
     try core.Panic()
     try ReleaseModifiers()
     ClearDaemonPid()
+    if g_instanceMutex
+        DllCall("CloseHandle", "Ptr", g_instanceMutex)
     LogMsg("daemon exiting, keyboard released")
 }
 
@@ -865,6 +1000,7 @@ BuildTray() {
     A_TrayMenu.Add()
     A_TrayMenu.Add("扫描按键(豁免)…", ScanKeysFlow)
     A_TrayMenu.Add("自定义快捷键…", CaptureHotkeyFlow)
+    A_TrayMenu.Add("坏键替代设置（长按 / 双击）…", ShowGestureSettings)
     A_TrayMenu.Add("重新识别内置键盘", ReidentifyFlow)
     A_TrayMenu.Add("清除全部豁免", ClearExempt)
     A_TrayMenu.Add("开机自动启动", ToggleAutostart)
@@ -879,7 +1015,10 @@ BuildTray() {
 
 UpdateTrayIcon(*) {
     global core
-    if (core.ids.Length = 0) {
+    if (core.mode = "error") {
+        TraySetIcon("shell32.dll", 78)
+        A_IconTip := "键盘开关：释放未确认，请紧急恢复"
+    } else if (core.ids.Length = 0) {
         TraySetIcon("shell32.dll", 78)
         A_IconTip := "键盘开关：未识别到内置键盘"
     } else if (core.blocked) {
@@ -921,12 +1060,16 @@ IsAutostart() {
 }
 
 CmdHandler(wParam, lParam, msg, hwnd) {
-    global core
+    global core, g_ready
+    if (!g_ready || !IsObject(core)) {
+        SetTimer(() => CmdHandler(wParam, lParam, msg, hwnd), -200)
+        return
+    }
     switch wParam {
         case CMD_TOGGLE:  SetBlocked(!core.blocked)
         case CMD_OFF:     SetBlocked(true)
         case CMD_ON:      SetBlocked(false)
-        case CMD_STATUS:  TrayTip("状态: " (core.blocked ? "已截断" : "正常") " | 设备 " core.ids.Length " | 豁免 " ExemptCount() " | 热键 " HotkeyPretty(g_hk), "键盘开关")
+        case CMD_STATUS:  TrayTip("状态: " (core.mode = "error" ? "未确认" : core.ids.Length = 0 ? "未识别" : core.blocked ? "已截断" : core.mode = "remap" ? "正常（坏键替代启用）" : "正常") " | 设备 " core.ids.Length " | 豁免 " ExemptCount() " | 热键 " HotkeyPretty(g_hk), "键盘开关")
         case CMD_GUI:     ShowGui()
         case CMD_REID:    ReidentifyFlow()
         case CMD_PANIC:   EmergencyRelease()

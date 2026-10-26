@@ -35,7 +35,7 @@ if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 function Info($m) { Write-Host "[..] $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "[OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[!!] $m" -ForegroundColor Yellow }
-function Fail($m) { Write-Host "[XX] $m" -ForegroundColor Red; Read-Host '安装中止, 按回车关闭'; exit 1 }
+function Fail($m) { Write-Host "[XX] $m" -ForegroundColor Red; if (-not $YesToAll) { Read-Host '安装中止, 按回车关闭' }; exit 1 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
 "=== setup $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" | Set-Content -LiteralPath $log -Encoding UTF8
@@ -68,10 +68,7 @@ if ($hvciOn) {
     Warn '检测到「内存完整性 (HVCI)」已开启。'
     Warn 'Interception 驱动是 2012 年个人签名, HVCI 会拒绝加载,'
     Warn '最坏情况会导致所有键盘 (含外接) 失效, 只能进安全模式恢复。'
-    if (-not $YesToAll) {
-        $a = Read-Host '继续安装? 建议先到 设置->隐私和安全性->Windows 安全中心->设备安全性->内核隔离 关闭内存完整性 (y/N)'
-        if ($a -ne 'y' -and $a -ne 'Y') { Fail '已按用户选择中止。' }
-    } else { L 'HVCI on, forced continue by -YesToAll' }
+    Fail '当前安全配置与该驱动不兼容，停止安装；-YesToAll 不绕过兼容性检查。本脚本不会更改 Windows 安全设置。'
 } else { Ok '内存完整性未开启, 驱动可正常加载' }
 L "hvci=$hvciOn"
 
@@ -79,6 +76,21 @@ Info '解除文件网络锁定标记 (压缩包经网络传输会带上)...'
 try { Get-ChildItem -LiteralPath $app -Recurse -File | Unblock-File; Ok '已解除' } catch { Warn "Unblock 跳过: $($_.Exception.Message)" }
 
 # ---- 2. 驱动 ----
+# Preserve an existing device-only installation. Re-running the official
+# installer would restore the class filter and expose external keyboards again.
+$keyboardClass = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e96b-e325-11ce-bfc1-08002be10318}'
+$classBefore = @((Get-ItemProperty -LiteralPath $keyboardClass).UpperFilters)
+$deviceBindings = @(Get-PnpDevice -Class Keyboard -PresentOnly -ErrorAction SilentlyContinue | ForEach-Object {
+    $deviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Enum\' + $_.InstanceId
+    $filters = @((Get-ItemProperty -LiteralPath $deviceKey -ErrorAction SilentlyContinue).UpperFilters)
+    if ($filters -contains 'keyboard') { $_.InstanceId }
+})
+$deviceOnly = ($classBefore -notcontains 'keyboard') -and $deviceBindings.Count -gt 0
+if ($deviceOnly) {
+    $SkipDriver = $true
+    Info '检测到设备级键盘过滤配置，保留现有驱动，不重新绑定全部键盘。'
+    L ('preserved device-only filters: ' + ($deviceBindings -join ', '))
+}
 $instExe = Join-Path $app 'driver\install-interception.exe'
 if (-not (Test-Path $instExe)) { Fail "找不到驱动安装器: $instExe" }
 
@@ -109,7 +121,7 @@ Info '校验安装结果...'
 $kbdSvc = & sc.exe qc keyboard 2>&1 | Out-String
 if ($kbdSvc -notmatch 'SYSTEM_START') { Fail 'keyboard 服务未生效为 SYSTEM_START' }
 $kbFilters = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e96b-e325-11ce-bfc1-08002be10318}').UpperFilters
-if ($kbFilters -notcontains 'keyboard') { Fail "键盘类 UpperFilters 中没有 keyboard 过滤项: $($kbFilters -join ',')" }
+if ($kbFilters -notcontains 'keyboard' -and -not $deviceOnly) { Fail "未发现键盘类或设备级 keyboard 过滤绑定: $($kbFilters -join ',')" }
 $sys = "$env:SystemRoot\System32\drivers\keyboard.sys"
 if (-not (Test-Path $sys)) { Fail "驱动文件不存在: $sys" }
 Ok '校验通过: 服务/过滤器/驱动文件全部就位'

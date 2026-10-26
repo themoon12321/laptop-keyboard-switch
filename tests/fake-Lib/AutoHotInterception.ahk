@@ -4,6 +4,8 @@
 class AutoHotInterception {
     static Calls := []
     __New() {
+        this._subs := Map()
+        this._sent := []
         this._devs := Map()
         ; 内置 PS/2 键盘 (命中启发式)
         this._devs[1] := {id: 1, vid: 0, pid: 0, IsMouse: false, Handle: "ACPI\VEN_MSFT&DEV_0001"}
@@ -14,9 +16,12 @@ class AutoHotInterception {
         return this._devs
     }
     SubscribeKeyboard(id, block, cb) {
+        this._subs[id] := cb
         AutoHotInterception.Calls.Push("subkb:" id)
     }
     UnsubscribeKeyboard(id) {
+        if this._subs.Has(id)
+            this._subs.Delete(id)
         AutoHotInterception.Calls.Push("unsubkb:" id)
     }
     SubscribeKey(id, code, block, cb) {
@@ -26,6 +31,7 @@ class AutoHotInterception {
         AutoHotInterception.Calls.Push("unsub:" id ":" code)
     }
     SendKeyEvent(id, code, state) {
+        this._sent.Push(id ":" code ":" state)
         AutoHotInterception.Calls.Push("send:" id ":" code ":" state)
     }
     SetState(s) {

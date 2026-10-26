@@ -4,9 +4,16 @@
 # =====================================================================
 $ErrorActionPreference = 'SilentlyContinue'
 
-# 只结束本工具的守护进程 (按命令行匹配, 放宽进程名以兼容 x86)
+# Ask this installation to release first, then stop only its remaining processes.
+$scriptPath = Join-Path $PSScriptRoot 'app\KeyboardToggle.ahk'
+$exeName = if ([Environment]::Is64BitOperatingSystem) { 'AutoHotkey64.exe' } else { 'AutoHotkey32.exe' }
+$ahkPath = Join-Path $PSScriptRoot ('app\AutoHotkey\' + $exeName)
+if ((Test-Path -LiteralPath $scriptPath) -and (Test-Path -LiteralPath $ahkPath)) {
+    & $ahkPath $scriptPath release | Out-Null
+}
+$scriptPattern = '(?i)(?:^|[\s"])' + [regex]::Escape($scriptPath) + '(?=["\s]|$)'
 Get-CimInstance Win32_Process -Filter "Name LIKE 'AutoHotkey%'" |
-    Where-Object { $_.CommandLine -like '*KeyboardToggle.ahk*' } |
+    Where-Object { $_.CommandLine -match $scriptPattern } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'LapKeySwitch'
 

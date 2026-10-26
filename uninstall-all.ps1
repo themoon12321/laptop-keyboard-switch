@@ -23,6 +23,26 @@ Write-Host '=== 完整卸载 (含驱动) ===' -ForegroundColor White
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir 'uninstall.ps1')
 Ok '用户组件已清理'
 
+# Remove per-device bindings too, before removing their driver service.
+foreach ($device in (Get-PnpDevice -Class Keyboard -ErrorAction SilentlyContinue)) {
+    $deviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Enum\' + $device.InstanceId
+    $filters = @((Get-ItemProperty -LiteralPath $deviceKey -ErrorAction SilentlyContinue).UpperFilters)
+    if ($filters -notcontains 'keyboard') { continue }
+    $remaining = @($filters | Where-Object { $_ -and $_ -ne 'keyboard' })
+    try {
+        if ($remaining.Count) {
+            Set-ItemProperty -LiteralPath $deviceKey -Name UpperFilters -Value $remaining -Type MultiString -ErrorAction Stop
+        } else {
+            Remove-ItemProperty -LiteralPath $deviceKey -Name UpperFilters -ErrorAction Stop
+        }
+        L ('removed device-level keyboard binding: ' + $device.InstanceId)
+    } catch {
+        L ('device binding removal failed: ' + $_.Exception.Message)
+        Write-Host '[ERROR] 设备级过滤器尚未移除，停止卸载驱动；详见 uninstall-all.log。' -ForegroundColor Red
+        exit 1
+    }
+}
+
 # 2. 卸载驱动
 $instExe = Join-Path $dir 'app\driver\install-interception.exe'
 if (Test-Path $instExe) {
