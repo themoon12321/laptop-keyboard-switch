@@ -1,0 +1,10 @@
+*.log
+*.log.old
+app/daemon.pid
+tests/*-results.txt
+tests/*-progress.txt
+tests/_t*.txt
+tools/keylog.txt
+/_*.txt
+app/driver/upperfilters-backup-*.txt
+__pycache__/

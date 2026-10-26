@@ -1,0 +1,24 @@
+﻿# =====================================================================
+#  用户级卸载: 快捷方式 + 自启 + 守护进程 (无需管理员, 键盘自动放行)
+#  要连驱动一起卸载, 请运行 uninstall-all.ps1
+# =====================================================================
+$ErrorActionPreference = 'SilentlyContinue'
+
+# 只结束本工具的守护进程 (按命令行匹配, 放宽进程名以兼容 x86)
+Get-CimInstance Win32_Process -Filter "Name LIKE 'AutoHotkey%'" |
+    Where-Object { $_.CommandLine -like '*KeyboardToggle.ahk*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'LapKeySwitch'
+
+$desktop = [Environment]::GetFolderPath('Desktop')
+'键盘开关.lnk',
+'切换内置键盘.lnk', '只留外接键盘.lnk', '恢复内置键盘.lnk',
+'键盘状态面板.lnk', '紧急恢复键盘.lnk',
+'关闭内置键盘.lnk', '开启内置键盘.lnk' |
+    ForEach-Object { Remove-Item -LiteralPath (Join-Path $desktop $_) -Force -ErrorAction SilentlyContinue }
+
+Write-Host '[OK] 快捷方式与开机自启已移除; 守护进程已退出, 内置键盘自动放行'
+Write-Host ''
+Write-Host '驱动仍在系统里 (不影响日常使用, 键盘直通)。'
+Write-Host '如需彻底卸载驱动恢复系统原状, 运行 uninstall-all.ps1 (会弹 UAC)。'
+exit 0
