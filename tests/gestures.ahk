@@ -61,11 +61,11 @@ Check(f.Output() = "1:45:1,1:45:0", "external Ctrl modifier bypasses gesture")
 f := Fixture([{source: 52, target: 53, mode: "hold", delay: 600}])
 f.Stroke(42, 1, 0), f.Stroke(52, 1, 10), f.Tick(610), f.Stroke(52, 0, 620), f.Stroke(42, 0, 630)
 Check(f.Output() = "1:42:1,1:53:1,1:53:0,1:42:0", "Shift stays held around slash target for question mark")
-f := Fixture([{source: 4, target: 5, mode: "hold", delay: 3000}])
-f.Stroke(4, 1, 0), f.Tick(2999)
-Check(f.events.Length = 0, "3 to 4 waits full three seconds")
-f.Tick(3000), f.Stroke(4, 0, 3010)
-Check(f.Output() = "1:5:1,1:5:0", "3 held three seconds produces 4")
+f := Fixture([{source: 4, target: 5, mode: "hold", delay: 600}])
+f.Stroke(4, 1, 0), f.Tick(599)
+Check(f.events.Length = 0, "3 to 4 waits full 600 milliseconds")
+f.Tick(600), f.Stroke(4, 0, 610)
+Check(f.Output() = "1:5:1,1:5:0", "3 held 600 milliseconds produces 4")
 doubleRule := [{source: 45, target: 44, mode: "double", delay: 300}]
 f := Fixture(doubleRule)
 f.Stroke(45, 1, 0), f.Stroke(45, 0, 40), f.Tick(339)
@@ -103,7 +103,7 @@ temporary := A_Temp "\kb-gesture-test-" ProcessExist() ".ini"
 try {
     GestureSettings.Save(temporary, GestureSettings.Defaults(), true)
     loaded := GestureSettings.Load(temporary)
-    Check(loaded.enabled && loaded.rules.Length = 3 && loaded.rules[3].delay = 3000, "settings round-trip preserves defaults")
+    Check(loaded.enabled && loaded.rules.Length = 3 && loaded.rules[3].delay = 600, "settings round-trip preserves defaults")
 } finally {
     try FileDelete(temporary)
 }

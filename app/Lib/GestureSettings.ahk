@@ -3,7 +3,7 @@ class GestureSettings {
         return [
             {source: GetKeySC("x"), target: GetKeySC("z"), mode: "hold", delay: 600},
             {source: 0x34, target: 0x35, mode: "hold", delay: 600},
-            {source: GetKeySC("3"), target: GetKeySC("4"), mode: "hold", delay: 3000}
+            {source: GetKeySC("3"), target: GetKeySC("4"), mode: "hold", delay: 600}
         ]
     }
     static Load(path) {
@@ -74,7 +74,7 @@ class GestureSettingsWindow {
         g.AddButton("xm y+12 w190 h32", "添加 / 更新原键规则").OnEvent("Click", this.Upsert.Bind(this))
         g.AddButton("x+12 yp w190 h32", "删除选中规则").OnEvent("Click", this.Delete.Bind(this))
         g.AddButton("x+12 yp w196 h32", "恢复你的三条默认规则").OnEvent("Click", this.Defaults.Bind(this))
-        g.AddText("xm y+12 w600", "长按建议 600 毫秒，双击建议 300 毫秒；数字 3 → 4 默认长按 3000 毫秒。`n启用时内置键盘需经过输入处理；外接键盘保持原样。截断内置时替代功能暂停。")
+        g.AddText("xm y+12 w600", "三条默认长按规则均为 600 毫秒，双击建议 300 毫秒。`n启用时内置键盘需经过输入处理；外接键盘保持原样。截断内置时替代功能暂停。")
         g.AddButton("xm y+14 w294 h36 Default", "保存并应用").OnEvent("Click", this.Save.Bind(this))
         g.AddButton("x+12 yp w294 h36", "取消").OnEvent("Click", (*) => g.Destroy())
         g.OnEvent("Close", (*) => g.Destroy())
