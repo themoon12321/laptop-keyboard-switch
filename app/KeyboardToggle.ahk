@@ -62,6 +62,14 @@ global g_gesturesEnabled := false
 global g_settingsWindow := 0
 global g_instanceMutex := 0
 
+; A fresh clone has no machine cache or personal mappings. Preserve all existing
+; local files on upgrades; safe defaults are copied only when missing.
+for configName in ["KeyboardToggle.ini", "KeyGestures.ini"] {
+    configPath := A_ScriptDir "\" configName
+    if !FileExist(configPath)
+        FileCopy(A_ScriptDir "\Defaults\" configName, configPath)
+}
+
 AcquireDaemonLock() {
     global g_instanceMutex
     pathHash := 2166136261
@@ -380,14 +388,46 @@ IdentifyFlow(silent) {
         return false
     }
     cached := CachedHandles()
-    n := core.Identify(lst, cached, silent ? 0 : ((list) => ObserveInternalDevices(list)))
+    observed := {used: false}
+    n := core.Identify(lst, cached, silent ? 0 : ((list) => ObserveForIdentification(list, observed)))
     if (n > 0) {
+        needsConfirmation := false
+        for handle in core.handles {
+            known := false
+            for old in cached
+                if (StrLower(handle) = StrLower(old))
+                    known := true
+            if !known
+                needsConfirmation := true
+        }
+        if (needsConfirmation && !observed.used) {
+            candidates := []
+            for i, id in core.ids
+                candidates.Push({id: id, handle: core.handles[i]})
+            core.ids := [], core.handles := []
+            if silent {
+                core.lastError := "device confirmation required"
+                return false
+            }
+            confirmed := ConfirmDevices(candidates)
+            if (!confirmed.Length)
+                return false
+            ; Only explicitly confirmed handles become trusted local cache.
+            n := core.Identify(lst, [], (*) => confirmed, false)
+            if (!n)
+                return false
+        }
         SaveHandles()
         LogMsg("identified " n " internal keyboard(s): " JoinArr(core.handles, " | "))
         return true
     }
     LogMsg("identify failed: " core.lastError)
     return false
+}
+
+ObserveForIdentification(list, observed) {
+    observed.used := true
+    return ObserveInternalDevices(list)
 }
 
 JoinArr(arr, sep) {
@@ -399,7 +439,7 @@ JoinArr(arr, sep) {
 
 ; 交互识别: 要求在内置键盘上按 2 个不同按键 (排除鼠标/外设干扰), 并勾选确认
 ObserveInternalDevices(list) {
-    global AHI
+    global AHI, core
     kbs := []
     for id, info in list {
         if (info.IsMouse)
@@ -413,8 +453,17 @@ ObserveInternalDevices(list) {
     if (kbs.Length = 0)
         return []
     hits := Map()      ; id -> Map(codes)
-    for id in kbs
+    for id in kbs {
+        ; Track attempts in the same ownership ledger as normal subscriptions.
+        ; Non-blocking observation must still clean up a partially failed API.
+        core.subs[id] := String(list[id].Handle)
         try AHI.SubscribeKeyboard(id, false, MakeObserver(id, &hits))
+        catch as e {
+            LogMsg("identification subscribe failed: " e.Message)
+            core.Stop()
+            return []
+        }
+    }
     TrayTip("识别向导: 请按【内置键盘】上的任意两个不同按键`n(15 秒内, 不要按外接键盘)", "键盘开关", 0)
     start := A_TickCount
     found := false
@@ -429,8 +478,10 @@ ObserveInternalDevices(list) {
             break
         Sleep 100
     }
-    for id in kbs
-        try AHI.UnsubscribeKeyboard(id)
+    if !core.Stop() {
+        TrayTip("识别订阅释放未确认，请先紧急恢复键盘", "键盘开关", 3)
+        return []
+    }
     if (!found) {
         TrayTip("识别向导超时, 请稍后重试 (面板 → 重新识别)", "键盘开关", 3)
         return []
@@ -465,7 +516,7 @@ ConfirmDevices(cand) {
     pg.AddText("w380", "以下设备收到了你的按键。请勾选所有【内置】键盘设备`n(外接键盘请不要勾选):")
     boxes := []
     for c in cand {
-        chk := pg.AddCheckBox("w380 y+6 Checked", c.handle)
+        chk := pg.AddCheckBox("w380 y+6", c.handle)
         boxes.Push({dev: c, chk: chk})
     }
     pg.AddButton("w380 h32 y+10", "确认并保存").OnEvent("Click", ConfirmClick.Bind(st, boxes, pg))
@@ -949,7 +1000,7 @@ OnAutoClick(*) {
 
 ; ---------------- 重新识别 / 应急 ----------------
 ReidentifyFlow(*) {
-    global core, g_desiredBlocked, g_scanGui
+    global core, g_desiredBlocked, g_scanGui, iniFile
     if IsObject(g_scanGui)
         EndScan(false)
     if !core.Reset() {
@@ -1043,17 +1094,24 @@ ToggleAutostart(*) {
 }
 
 SetAutostart() {
+    path := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+    existing := RegRead(path, "LapKeySwitch", "")
+    if (existing != "" && !IsOurCommandLine(existing)) {
+        MsgBox("其他安装正在使用这个自启项，请先卸载该副本。", "无法启用自启")
+        return
+    }
     RegWrite('"' A_AhkPath '" "' A_ScriptFullPath '"', "REG_SZ", "HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "LapKeySwitch")
 }
 
 RemoveAutostart() {
-    try RegDelete("HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "LapKeySwitch")
+    if IsAutostart()
+        try RegDelete("HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "LapKeySwitch")
 }
 
 IsAutostart() {
     try {
         v := RegRead("HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "LapKeySwitch")
-        return (v != "")
+        return IsOurCommandLine(v)
     } catch {
         return false
     }

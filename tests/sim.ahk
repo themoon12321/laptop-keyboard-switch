@@ -303,6 +303,16 @@ Check(n16b = 0 && c16b.ids.Length = 0, "T16b Bluetooth-only interactive result i
 Prog("T16b done")
 
 Prog("ALL done")
+ambiguous := FakeAHI()
+ambiguous.AddDev(1, "USB\same-model")
+ambiguous.AddDev(2, "USB\same-model")
+ambiguousCore := NewCore(ambiguous)
+Check(ambiguousCore.Identify(ambiguous.GetDeviceList(), ["USB\same-model"]) = 0,
+    "duplicate hardware handles cannot silently select internal and external together")
+manualOnly := NewCore(f)
+confirmedOnly := (list) => [{id: 2, handle: "USB\VID_32C2&PID_0018"}]
+Check(manualOnly.Identify(f.GetDeviceList(), [], confirmedOnly, false) = 1 && manualOnly.ids[1] = 2,
+    "confirmed selection bypasses ACPI heuristic instead of silently overriding it")
 ; Failed cleanup must remain visible and must prevent any re-subscription.
 f17 := FakeAHI()
 f17.AddDev(1, "ACPI\internal")

@@ -1,4 +1,4 @@
-# Unique sandbox, fake AHI, disabled system hotkeys/Send and hidden GUIs.
+﻿# Unique sandbox, fake AHI, disabled system hotkeys/Send and hidden GUIs.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 $srcApp = Join-Path $root 'app'
@@ -31,6 +31,13 @@ IntegrationCheck(condition, label) {
 IntegrationSelfTest() {
     global core, AHI, iniFile, g_desiredBlocked, g_gestureRules, g_gesturesEnabled, g_gui
     try {
+        savedCache := CachedHandles()
+        IniWrite("", iniFile, "device", "handles")
+        core.Reset()
+        IntegrationCheck(!IdentifyFlow(true) && core.ids.Length = 0 && AHI._subs.Count = 0,
+            "fresh machine cannot silently select heuristic keyboard")
+        IniWrite(JoinArr(savedCache, ","), iniFile, "device", "handles")
+        IdentifyFlow(true)
         SetBlocked(true, false)
         device := AHI._devs[1]
         AHI._devs.Delete(1)
@@ -87,7 +94,7 @@ IntegrationSelfTest() {
     $script = Join-Path $work 'KbTest.ahk'
     Set-Content -LiteralPath $script -Value $source -Encoding UTF8
     '[gestures]' + "`nenabled=0`ncount=0" | Set-Content -LiteralPath (Join-Path $work 'KeyGestures.ini') -Encoding Unicode
-    '[state]' + "`nblocked=1" | Set-Content -LiteralPath (Join-Path $work 'KeyboardToggle.ini') -Encoding Unicode
+    '[device]' + "`nmachine=$env:COMPUTERNAME`nhandles=ACPI\VEN_MSFT&DEV_0001`n[state]`nblocked=1" | Set-Content -LiteralPath (Join-Path $work 'KeyboardToggle.ini') -Encoding Unicode
     $ahkExe = Join-Path $work 'AutoHotkey\AutoHotkey64.exe'
     $stdout = Join-Path $work 'stdout.txt'
     $stderr = Join-Path $work 'stderr.txt'

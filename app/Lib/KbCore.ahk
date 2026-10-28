@@ -58,24 +58,34 @@ class KbCore {
     static IsBluetoothHandle(h) {
         return RegExMatch(String(h), "i)^(bthle|bthledevice|bthenum|bth)\\") != 0
     }
-    Identify(list, cachedHandles := [], interactiveFn := 0) {
+    Identify(list, cachedHandles := [], interactiveFn := 0, allowHeuristic := true) {
         this.lastError := ""
         if (!IsObject(list) || list.Count = 0) {
             this.lastError := "no keyboard devices visible to driver"
             return 0
         }
-        hits := [], heuristic := []
+        hits := [], heuristic := [], handleCounts := Map()
+        for id, info in list {
+            if !info.IsMouse {
+                normalized := StrLower(String(info.Handle))
+                handleCounts[normalized] := handleCounts.Get(normalized, 0) + 1
+            }
+        }
         for id, info in list {
             if (info.IsMouse || KbCore.IsBluetoothHandle(info.Handle))
                 continue
             h := StrLower(String(info.Handle))
+            ; AHI hardware handles are not always unique physical identities.
+            ; Never trust a cached handle that now identifies multiple devices.
+            if (h = "" || handleCounts[h] > 1)
+                continue
             selected := false
             for cached in cachedHandles
                 if (h = StrLower(String(cached)))
                     selected := true
             if selected
                 hits.Push({id: id, handle: String(info.Handle)})
-            if (InStr(h, "msft0001") || InStr(h, "acpi\"))
+            if (allowHeuristic && (InStr(h, "msft0001") || InStr(h, "acpi\")))
                 heuristic.Push({id: id, handle: String(info.Handle)})
         }
         if (hits.Length = 0)
@@ -97,12 +107,12 @@ class KbCore {
             got := interactiveFn.Call(list)
             if IsObject(got)
                 for g in got
-                    if (!KbCore.IsBluetoothHandle(g.handle) && list.Has(g.id) && !list[g.id].IsMouse
+                    if (!KbCore.IsBluetoothHandle(g.handle) && handleCounts.Get(StrLower(String(g.handle)), 0) = 1 && list.Has(g.id) && !list[g.id].IsMouse
                         && StrLower(String(list[g.id].Handle)) = StrLower(String(g.handle)))
                         hits.Push(g)
         }
         if (hits.Length = 0) {
-            this.lastError := "no internal keyboard matched"
+            this.lastError := "no unambiguous internal keyboard matched"
             return 0
         }
         this.ids := []
