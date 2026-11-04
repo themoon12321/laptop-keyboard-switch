@@ -16,6 +16,7 @@ try {
         'app/AutoHotkey/AutoHotkey32.exe','app/AutoHotkey/AutoHotkey64.exe','app/AutoHotkey/license.txt',
         'app/Lib/AutoHotInterception.ahk','app/Lib/AutoHotInterception.dll','app/Lib/CLR.ahk',
         'app/Lib/GestureSettings.ahk','app/Lib/KbCore.ahk','app/Lib/KeyGestures.ahk',
+        'app/Lib/AppTheme.ahk','app/Lib/MainPanel.ahk','app/Lib/ShortcutCapture.ahk','app/Lib/ShortcutSettings.ahk',
         'app/Lib/x64/interception.dll','app/Lib/x86/interception.dll','app/driver/install-interception.exe')
     $files+=@(Get-ChildItem -LiteralPath (Join-Path $root 'licenses') -File | ForEach-Object {'licenses/'+$_.Name})
     $manifest=@()

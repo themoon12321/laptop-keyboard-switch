@@ -1,3 +1,4 @@
+#Include %A_LineFile%\..\AppTheme.ahk
 class GestureSettings {
     static Defaults() {
         return [
@@ -42,101 +43,175 @@ class GestureSettings {
     static Name(code) {
         name := GetKeyName("SC" Format("{:03X}", code))
         if (code = 0x34)
-            return ". / >"
+            return "句号 / >"
         if (code = 0x35)
-            return "/ / ?"
+            return "斜杠 / ?"
         return name != "" ? name : "SC" Format("{:03X}", code)
     }
 }
 
 class GestureSettingsWindow {
     __New(rules, enabled, onSave) {
-        this.rules := rules.Clone()
-        this.onSave := onSave
-        this.window := Gui(, "坏键替代 · 仅内置键盘")
+        this.rules := rules.Clone(), this.onSave := onSave
+        this.editing := 0, this.dirty := false, this.loading := true
+        this.window := Gui(, "按键替代设置")
         g := this.window
-        g.SetFont("s10", "Microsoft YaHei UI")
-        g.MarginX := 16, g.MarginY := 14
-        this.enabled := g.AddCheckBox("xm w600 Checked" (enabled ? 1 : 0), "启用坏键替代（只作用于已识别的内置键盘）")
-        g.AddText("xm y+10 w600", "短按保留原键；长按或双击输入目标键。Shift/CapsLock 照常决定大小写。`nCtrl/Alt/Win 组合及连续打字会优先保留原键。Fn 不支持，可选择 F1–F12。")
-        this.list := g.AddListView("xm y+12 w600 r8 -Multi", ["原键", "触发方式", "输入目标键", "时间 (毫秒)"])
+        AppTheme.Setup(g)
+        AppTheme.Text(g, "x24 y18 w580 h34", "按键替代", 20, "17233B", 600)
+        AppTheme.Text(g, "x24 y60 w580 h24", "用好用的按键代替坏键，只对内置键盘生效。", 10, "64748B")
+        AppTheme.Card(g, 24, 100, 592, 58)
+        this.enabled := g.AddCheckBox("x42 y118 w550 h24 BackgroundFFFFFF Checked" (enabled ? 1 : 0), "启用按键替代")
+        this.list := g.AddListView("x24 y176 w592 h126 -Multi", ["按哪个键", "操作", "输入哪个键", "时间（毫秒）"])
         for col in [1, 2, 3, 4]
-            this.list.ModifyCol(col, 145)
+            this.list.ModifyCol(col, col = 4 ? 140 : 144)
         this.list.OnEvent("ItemSelect", this.Select.Bind(this))
-        g.AddText("xm y+12 w120", "原键（如 x）")
-        g.AddText("x+10 yp w120", "触发方式")
-        g.AddText("x+10 yp w120", "目标键（如 z）")
-        g.AddText("x+10 yp w120", "时间（毫秒）")
-        this.source := g.AddEdit("xm y+6 w120", "x")
-        this.trigger := g.AddDropDownList("x+10 yp w120 Choose1", ["长按", "双击"])
-        this.target := g.AddEdit("x+10 yp w120", "z")
-        this.delay := g.AddEdit("x+10 yp w120 Number", "600")
-        g.AddButton("xm y+12 w190 h32", "添加 / 更新原键规则").OnEvent("Click", this.Upsert.Bind(this))
-        g.AddButton("x+12 yp w190 h32", "删除选中规则").OnEvent("Click", this.Delete.Bind(this))
-        g.AddButton("x+12 yp w196 h32", "恢复三条示例规则").OnEvent("Click", this.Defaults.Bind(this))
-        g.AddText("xm y+12 w600", "三条默认长按规则均为 600 毫秒，双击建议 300 毫秒。`n启用时内置键盘需经过输入处理；外接键盘保持原样。截断内置时替代功能暂停。")
-        g.AddButton("xm y+14 w294 h36 Default", "保存并应用").OnEvent("Click", this.Save.Bind(this))
-        g.AddButton("x+12 yp w294 h36", "取消").OnEvent("Click", (*) => g.Destroy())
+        AppTheme.Button(g, "x24 y312 w120 h32", "添加规则", this.NewRule.Bind(this))
+        this.deleteButton := AppTheme.Button(g, "x154 y312 w120 h32", "删除规则", this.Delete.Bind(this))
+        AppTheme.Card(g, 24, 360, 592, 152)
+        this.editorTitle := AppTheme.Text(g, "x42 y374 w530 h24 BackgroundFFFFFF", "编辑规则", 11, "17233B", 600)
+        AppTheme.Text(g, "x42 y408 w118 h20 BackgroundFFFFFF", "按哪个键", 9, "64748B")
+        AppTheme.Text(g, "x180 y408 w112 h20 BackgroundFFFFFF", "操作", 9, "64748B")
+        AppTheme.Text(g, "x312 y408 w118 h20 BackgroundFFFFFF", "输入哪个键", 9, "64748B")
+        this.timeLabel := AppTheme.Text(g, "x450 y408 w150 h20 BackgroundFFFFFF", "长按时长（毫秒）", 9, "64748B")
+        this.source := g.AddEdit("x42 y434 w118 h28", "")
+        this.trigger := g.AddDropDownList("x180 y434 w112 Choose1", ["长按", "双击"])
+        this.target := g.AddEdit("x312 y434 w118 h28", "")
+        this.delay := g.AddEdit("x450 y434 w146 h28 Number", "600")
+        g.AddUpDown("Range150-10000", 600)
+        this.duration := AppTheme.Text(g, "x42 y478 w554 h22 BackgroundFFFFFF", "", 9, "64748B")
+        this.feedback := AppTheme.Text(g, "x24 y528 w592 h40", "", 9, "64748B")
+        AppTheme.Button(g, "x320 y580 w140 h36 Default", "保存并应用", this.Save.Bind(this))
+        AppTheme.Button(g, "x476 y580 w140 h36", "取消", (*) => g.Destroy())
+        AppTheme.Text(g, "x24 y580 w278 h36", "短按保留原键。快捷键优先保留原操作。", 9, "64748B")
+        for ctrl in [this.source, this.target, this.trigger, this.delay]
+            ctrl.OnEvent("Change", this.Changed.Bind(this))
+        this.enabled.OnEvent("Click", (*) => this.Hint("开关修改将在保存后生效。"))
         g.OnEvent("Close", (*) => g.Destroy())
-        this.Refresh()
+        this.loading := false
+        this.Refresh(this.rules.Length ? 1 : 0)
     }
     Show() {
-        this.window.Show()
+        this.window.Show("w640 h638")
     }
-    Refresh() {
+    Hint(text, error := false) {
+        this.feedback.Text := text
+        this.feedback.SetFont(error ? "cB42318" : "c64748B", "Microsoft YaHei UI")
+    }
+    Changed(*) {
+        if this.loading
+            return
+        this.dirty := true
+        this.Describe()
+        this.Hint("有未保存的修改；点击“保存并应用”即可生效。")
+    }
+    Describe() {
+        this.timeLabel.Text := this.trigger.Value = 1 ? "长按时长（毫秒）" : "双击间隔（毫秒）"
+        try seconds := Format("{:.2f}", Integer(this.delay.Value) / 1000)
+        catch
+            seconds := "—"
+        this.duration.Text := "当前时间：" seconds " 秒 · 可输入 150–10000 毫秒。按键名示例：X、3、Enter、SC034。"
+    }
+    LoadRow(row) {
+        this.loading := true
+        this.editing := row
+        if row {
+            rule := this.rules[row]
+            this.source.Value := GetKeyName("SC" Format("{:03X}", rule.source))
+            this.target.Value := GetKeyName("SC" Format("{:03X}", rule.target))
+            this.trigger.Choose(rule.mode = "hold" ? 1 : 2)
+            this.delay.Value := rule.delay
+            this.editorTitle.Text := "编辑规则 · " GestureSettings.Name(rule.source) " → " GestureSettings.Name(rule.target)
+        } else {
+            this.source.Value := "", this.target.Value := ""
+            this.trigger.Choose(1), this.delay.Value := "600"
+            this.editorTitle.Text := "新规则"
+        }
+        this.deleteButton.Enabled := row > 0
+        this.dirty := false, this.loading := false
+        this.Describe()
+    }
+    Refresh(row := 0) {
+        this.loading := true
         this.list.Delete()
         for rule in this.rules
             this.list.Add(, GestureSettings.Name(rule.source), rule.mode = "hold" ? "长按" : "双击", GestureSettings.Name(rule.target), rule.delay)
+        if row
+            this.list.Modify(row, "Select Focus Vis")
+        this.loading := false
+        this.LoadRow(row)
+        this.Hint(this.rules.Length ? "选中规则即可修改按键和时间，保存后生效。" : "暂无规则。填写下面的按键和时间，再保存即可。")
     }
     Select(ctrl, row, selected) {
-        if (!selected || row < 1 || row > this.rules.Length)
+        if (this.loading || !selected || row < 1 || row > this.rules.Length || row = this.editing)
             return
-        rule := this.rules[row]
-        this.source.Value := "SC" Format("{:03X}", rule.source)
-        this.target.Value := "SC" Format("{:03X}", rule.target)
-        this.trigger.Choose(rule.mode = "hold" ? 1 : 2)
-        this.delay.Value := rule.delay
+        if (this.dirty && !this.CommitEditor()) {
+            this.loading := true
+            this.list.Modify(row, "-Select")
+            if this.editing
+                this.list.Modify(this.editing, "Select Focus")
+            this.loading := false
+            return
+        }
+        this.LoadRow(row)
     }
-    Upsert(*) {
+    CommitEditor() {
+        if !this.dirty
+            return true
         try {
             rule := {source: GetKeySC(Trim(this.source.Value)), target: GetKeySC(Trim(this.target.Value)),
                 mode: this.trigger.Value = 1 ? "hold" : "double", delay: Integer(this.delay.Value)}
             rules := this.rules.Clone()
-            replaced := false
-            for i, old in rules
-                if (old.source = rule.source) {
-                    rules[i] := rule
-                    replaced := true
-                    break
-                }
-            if (!replaced)
+            if this.editing
+                rules[this.editing] := rule
+            else
                 rules.Push(rule)
             if (rules.Length > 64)
-                throw Error("最多配置 64 条规则")
+                throw Error("最多配置 64 条规则。")
             KeyGestures.Validate(rules)
             this.rules := rules
-            this.Refresh()
+            if !this.editing
+                this.editing := rules.Length
+            this.dirty := false
+            this.loading := true
+            if (this.list.GetCount() < this.rules.Length)
+                this.list.Add(, GestureSettings.Name(rule.source), rule.mode = "hold" ? "长按" : "双击", GestureSettings.Name(rule.target), rule.delay)
+            else
+                this.list.Modify(this.editing, , GestureSettings.Name(rule.source), rule.mode = "hold" ? "长按" : "双击", GestureSettings.Name(rule.target), rule.delay)
+            this.loading := false
+            return true
         } catch as e {
-            MsgBox(e.Message, "规则未添加", "Icon!")
+            this.loading := false
+            this.Hint("未保存：" e.Message, true)
+            return false
         }
+    }
+    NewRule(*) {
+        if !this.CommitEditor()
+            return
+        this.loading := true
+        this.list.Modify(0, "-Select")
+        this.loading := false
+        this.LoadRow(0)
+        this.source.Focus()
+        this.Hint("填写新规则，完成后直接保存；再次添加可继续编辑下一条。")
     }
     Delete(*) {
-        row := this.list.GetNext()
-        if row {
+        if this.editing {
+            row := this.editing
             this.rules.RemoveAt(row)
-            this.Refresh()
+            this.dirty := false
+            this.Refresh(this.rules.Length ? Min(row, this.rules.Length) : 0)
+            this.Hint("规则已移除，点击保存后生效。")
         }
     }
-    Defaults(*) {
-        this.rules := GestureSettings.Defaults()
-        this.Refresh()
-    }
     Save(*) {
+        if !this.CommitEditor()
+            return
         try {
             if this.onSave.Call(this.rules, this.enabled.Value = 1)
                 this.window.Destroy()
         } catch as e {
-            MsgBox(e.Message, "设置未保存", "Icon!")
+            this.Hint("未保存：" e.Message, true)
         }
     }
 }

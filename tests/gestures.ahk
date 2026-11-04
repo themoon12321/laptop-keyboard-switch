@@ -111,6 +111,42 @@ try {
 dialog := GestureSettingsWindow(GestureSettings.Defaults(), true, (*) => false)
 dialog.window.Show("Hide AutoSize")
 Check(dialog.list.GetCount() = 3 && dialog.enabled.Value = 1, "settings panel builds with all three rules")
+dialog.delay.Value := "450"
+dialog.Changed()
+Check(dialog.CommitEditor() && dialog.rules[1].delay = 450, "time edit commits without separate update button")
+dialog.source.Value := "v"
+dialog.target.Value := "b"
+dialog.Changed()
+Check(dialog.CommitEditor() && dialog.rules.Length = 3 && dialog.rules[1].source = GetKeySC("v"), "editing source replaces selected rule rather than adding duplicate")
+dialog.NewRule()
+dialog.source.Value := "a", dialog.target.Value := "s", dialog.delay.Value := "750"
+dialog.Changed()
+Check(dialog.CommitEditor() && dialog.rules.Length = 4 && dialog.rules[4].delay = 750, "new rule accepts custom time")
+dialog.delay.Value := "0"
+dialog.Changed()
+Check(!dialog.CommitEditor() && dialog.rules[4].delay = 750 && InStr(dialog.feedback.Text, "未保存"), "invalid time keeps original rule and displays inline error")
+dialog.delay.Value := "900", dialog.Changed()
+dialog.Select(dialog.list, 2, true)
+Check(dialog.rules[4].delay = 900 && dialog.editing = 2, "changing selection retains pending time edit")
+dialog.Delete()
+Check(dialog.rules.Length = 3, "delete is local until save")
+saved := {rules: []}
+dialog.onSave := (rules, enabled) => StoreSavedRules(saved, rules)
+dialog.delay.Value := "800", dialog.Changed()
+dialog.Save()
+Check(saved.rules.Length = 3 && saved.rules[dialog.editing].delay = 800, "Save directly includes editor value")
+StoreSavedRules(holder, rules) {
+    holder.rules := rules.Clone()
+    return false
+}
+dialog.window.GetClientPos(, , &w, &h)
+fits := true
+for ctrl in dialog.window {
+    ctrl.GetPos(&x, &y, &cw, &ch)
+    if (x < 0 || y < 0 || x + cw > w || y + ch > h)
+        fits := false
+}
+Check(fits, "all replacement controls stay within the window")
 dialog.window.Destroy()
 FileAppend("TOTAL: " passed " passed, " failed " failed`n", "*")
 ExitApp(failed ? 1 : 0)

@@ -1,4 +1,5 @@
 ﻿# Unique sandbox, fake AHI, disabled system hotkeys/Send and hidden GUIs.
+param([string]$PreviewDirectory='')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 $srcApp = Join-Path $root 'app'
@@ -8,7 +9,17 @@ $daemon = $null
 try {
     Copy-Item (Join-Path $srcApp '*') $work -Recurse -Force -Exclude daemon.pid,*.log,*.log.old
     Copy-Item (Join-Path $PSScriptRoot 'fake-Lib\AutoHotInterception.ahk') (Join-Path $work 'Lib\AutoHotInterception.ahk') -Force
+    foreach ($relative in @('Lib\MainPanel.ahk','Lib\ShortcutSettings.ahk')) {
+        $libPath=Join-Path $work $relative
+        $libSource=Get-Content -LiteralPath $libPath -Raw -Encoding UTF8
+        $libSource=$libSource -replace '(?<![A-Za-z0-9_])Hotkey\(', 'TestHotkey('
+        $libSource=$libSource -replace '(?<![A-Za-z0-9_])GetKeyState\(', 'TestKeyState('
+        $libSource=$libSource -replace '(?<![A-Za-z0-9_])WinActive\(', 'TestWinActive('
+        $libSource=$libSource.Replace('g_gui.Show()', 'g_gui.Show("Hide AutoSize")')
+        Set-Content -LiteralPath $libPath -Value $libSource -Encoding UTF8
+    }
     $source = Get-Content -LiteralPath (Join-Path $work 'KeyboardToggle.ahk') -Raw -Encoding UTF8
+    $source = '#Include ' + (Join-Path $PSScriptRoot 'fake-Lib\FakeInputHook.ahk') + "`n" + $source
     $source = $source -replace '(?<![A-Za-z0-9_])Hotkey\(', 'TestHotkey('
     $source = $source -replace '(?ms)^ReleaseModifiers\(\) \{.*?^\}', "ReleaseModifiers() {`n}"
     $source = $source -replace '(?ms)^SyncShortcutHotkey\(\) \{.*?^\}', "SyncShortcutHotkey() {`n}"
@@ -20,8 +31,18 @@ try {
     $source = $source.Replace('case CMD_PANIC:   EmergencyRelease()', "case 100: IntegrationSelfTest()`n        case CMD_PANIC:   EmergencyRelease()")
     $testFunctions = @'
 
-TestHotkey(*) {
+TestHotkey(hk, callback := 0, options := "") {
+    global g_failRegistration
+    if (IsSet(g_failRegistration) && hk = g_failRegistration && options = "On")
+        throw Error("simulated hotkey conflict")
     return ""
+}
+TestKeyState(*) {
+    return false
+}
+TestWinActive(*) {
+    global g_testFocus
+    return IsSet(g_testFocus) ? g_testFocus : true
 }
 TestTrayTip(*) {
 }
@@ -30,6 +51,7 @@ IntegrationCheck(condition, label) {
 }
 IntegrationSelfTest() {
     global core, AHI, iniFile, g_desiredBlocked, g_gestureRules, g_gesturesEnabled, g_gui
+    global g_hk, g_captureActive, g_captureCandidate, g_ctlHkPreview, g_ctlHkState, g_ctlHkHint, g_failRegistration, g_testFocus
     try {
         savedCache := CachedHandles()
         IniWrite("", iniFile, "device", "handles")
@@ -75,6 +97,36 @@ IntegrationSelfTest() {
         ApplyGestureSettings(GestureSettings.Defaults(), false)
         IntegrationCheck(core.mode = "pass" && core.subs.Count = 0 && AHI._subs.Count = 0, "disable gestures removes all subscriptions")
         ShowGui()
+        oldHK := g_hk
+        SetBlocked(true, false)
+        hook := FakeInputHook()
+        BeginShortcutCapture(hook)
+        IntegrationCheck(g_captureActive && core.mode = "pass" && g_desiredBlocked && InStr(g_ctlHkState.Text, "正在录制"), "recording state is visible and releases blocked internal input")
+        hook.OnKeyDown.Call(hook, 0, 29)
+        IntegrationCheck(InStr(g_ctlHkPreview.Text, "Ctrl"), "panel previews modifiers before main key")
+        hook.OnKeyDown.Call(hook, 0, 42), hook.OnKeyDown.Call(hook, 0, 45)
+        hook.OnKeyUp.Call(hook, 0, 45), hook.OnKeyUp.Call(hook, 0, 42), hook.OnKeyUp.Call(hook, 0, 29)
+        IntegrationCheck(!g_captureActive && core.blocked && g_hk = oldHK && g_captureCandidate = "^+SC02D", "recorded chord waits for Save and restores previous blocking state")
+        SaveCapturedShortcut()
+        IntegrationCheck(g_hk = "^+SC02D" && IniRead(iniFile, "hotkey", "combo") = g_hk, "explicit Save registers and persists recorded shortcut")
+        hook := FakeInputHook(), BeginShortcutCapture(hook)
+        hook.OnKeyDown.Call(hook, 0, 1)
+        IntegrationCheck(!g_captureActive && core.blocked && g_captureCandidate = "", "Escape cancels recording and restores blocking")
+        stale := hook
+        hook := FakeInputHook(), BeginShortcutCapture(hook)
+        CaptureHookEnded(stale)
+        IntegrationCheck(g_captureActive, "late end event from old recorder cannot cancel new recording")
+        g_testFocus := false
+        ShortcutCaptureTick()
+        g_testFocus := true
+        IntegrationCheck(!g_captureActive && core.blocked, "focus loss cancels recorder and restores previous input state")
+        g_failRegistration := "^SC02E", g_captureCandidate := "^SC02E"
+        SaveCapturedShortcut()
+        IntegrationCheck(g_hk = "^+SC02D" && InStr(g_ctlHkHint.Text, "未保存"), "registration failure leaves current shortcut unchanged with inline error")
+        g_failRegistration := ""
+        CancelShortcutCapture()
+        ApplyHotkey(oldHK)
+        SetBlocked(false, false)
         g_gui.GetClientPos(, , &width, &height)
         fits := true
         for control in g_gui {
@@ -83,6 +135,7 @@ IntegrationSelfTest() {
                 fits := false
         }
         IntegrationCheck(fits, "all main panel controls stay inside client bounds")
+        ; PREVIEW_INSERT
         g_gui.Hide()
         FileAppend("DONE`n", A_ScriptDir "\integration-results.txt", "UTF-8")
     } catch as err {
@@ -90,6 +143,25 @@ IntegrationSelfTest() {
     }
 }
 '@
+    if ($PreviewDirectory) {
+        $PreviewDirectory=[IO.Path]::GetFullPath($PreviewDirectory)
+        New-Item -ItemType Directory -Path $PreviewDirectory -Force | Out-Null
+        $preview=$PreviewDirectory.Replace('`','``').Replace('"','`"')
+        $render=@'
+        CaptureTestWindow(g_gui, "PREVIEW_PATH\main.bmp")
+        BeginShortcutCapture(FakeInputHook())
+        CaptureShortcutKey(29, 1), CaptureShortcutKey(42, 1), CaptureShortcutKey(45, 1)
+        CaptureTestWindow(g_gui, "PREVIEW_PATH\recording.bmp")
+        CancelShortcutCapture()
+        settingsPreview := GestureSettingsWindow(GestureSettings.Defaults(), true, (*) => false)
+        settingsPreview.window.Show("Hide AutoSize")
+        settingsPreview.delay.Value := "450", settingsPreview.Changed()
+        CaptureTestWindow(settingsPreview.window, "PREVIEW_PATH\settings.bmp")
+        settingsPreview.window.Destroy()
+'@
+        $testFunctions=$testFunctions.Replace('; PREVIEW_INSERT',$render.Replace('PREVIEW_PATH',$preview))
+        $source += "`n#Include " + (Join-Path $PSScriptRoot 'window-capture.ahk') + "`n"
+    }
     $source += $testFunctions
     $script = Join-Path $work 'KbTest.ahk'
     Set-Content -LiteralPath $script -Value $source -Encoding UTF8

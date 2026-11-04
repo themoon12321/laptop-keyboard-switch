@@ -1,4 +1,4 @@
-﻿; =====================================================================
+; =====================================================================
 ;  笔记本内置键盘 热开关 + 内置键盘坏键替代
 ;
 ;  核心引擎见 lib\KbCore.ahk (整设备订阅 + 豁免重注入 + 幽灵键修复)
@@ -22,7 +22,11 @@
 Persistent
 #include Lib\AutoHotInterception.ahk
 #include lib\KbCore.ahk
+#include Lib\AppTheme.ahk
 #include Lib\GestureSettings.ahk
+#include Lib\ShortcutCapture.ahk
+#include Lib\ShortcutSettings.ahk
+#include Lib\MainPanel.ahk
 
 global WM_APP_CMD   := 0x8000
 global CMD_TOGGLE   := 1
@@ -61,6 +65,9 @@ global g_gestureRules := []
 global g_gesturesEnabled := false
 global g_settingsWindow := 0
 global g_instanceMutex := 0
+global g_captureActive := false, g_captureHook := 0, g_captureState := 0, g_captureCandidate := "", g_captureUntil := 0
+global g_ctlStatusHint := 0, g_ctlToggle := 0, g_ctlHkState := 0, g_ctlHkPreview := 0, g_ctlHkHint := 0
+global g_btnHkRecord := 0, g_btnHkSave := 0, g_btnHkCancel := 0
 
 ; A fresh clone has no machine cache or personal mappings. Preserve all existing
 ; local files on upgrades; safe defaults are copied only when missing.
@@ -303,8 +310,8 @@ PumpGestures() {
 }
 
 OnTick() {
-    global g_tick, g_watchFails, g_lastInteractive, core, g_desiredBlocked, g_scanGui
-    if IsObject(g_scanGui)
+    global g_tick, g_watchFails, g_lastInteractive, core, g_desiredBlocked, g_scanGui, g_captureActive
+    if (IsObject(g_scanGui) || g_captureActive)
         return
     g_tick++
     ; 已识别: 每 2 秒核验一次设备身份/编号 (开销极小), 设备变化时立即可见
@@ -479,7 +486,7 @@ ObserveInternalDevices(list) {
         Sleep 100
     }
     if !core.Stop() {
-        TrayTip("识别订阅释放未确认，请先紧急恢复键盘", "键盘开关", 3)
+        TrayTip("识别订阅释放未确认，请使用“停止处理并退出”", "键盘开关", 3)
         return []
     }
     if (!found) {
@@ -555,7 +562,9 @@ ApplyPendingState() {
 
 ; ---------------- 状态切换 ----------------
 SetBlocked(block, notify := true, persist := true) {
-    global core, g_desiredBlocked, iniFile, g_scanGui
+    global core, g_desiredBlocked, iniFile, g_scanGui, g_captureActive
+    if g_captureActive
+        CancelShortcutCapture()
     if IsObject(g_scanGui)
         EndScan(false)
     if persist {
@@ -576,7 +585,7 @@ SetBlocked(block, notify := true, persist := true) {
             ReleaseModifiers()
             LogMsg("BLOCK FAILED: " core.lastError)
             if notify
-                TrayTip("截断失败: " core.lastError, "键盘开关", 3)
+                TrayTip("暂停输入失败：" core.lastError, "键盘开关", 3)
             UpdateTrayIcon()
             UpdateGui()
             return false
@@ -593,7 +602,7 @@ SetBlocked(block, notify := true, persist := true) {
         ReleaseModifiers()   ; 清除可能的残留按下状态
     }
     if notify
-        TrayTip(core.blocked ? "内置键盘已截断 (" core.ids.Length " 个设备)`n只保留外接键盘" : "内置键盘已恢复", "键盘开关")
+        TrayTip(core.blocked ? "内置键盘已暂停输入 (" core.ids.Length " 个设备)`n只保留外接键盘" : "内置键盘已恢复", "键盘开关")
     UpdateTrayIcon()
     UpdateGui()
     LogMsg("state -> " (core.blocked ? "blocked" : "allowed") " subs=" core.subs.Count)
@@ -602,6 +611,7 @@ SetBlocked(block, notify := true, persist := true) {
 
 ; ---------------- 坏键替代设置 ----------------
 ShowGestureSettings(*) {
+    CancelShortcutCapture()
     global g_settingsWindow, g_gestureRules, g_gesturesEnabled
     if IsObject(g_settingsWindow) {
         try {
@@ -639,27 +649,27 @@ ApplyGestureSettings(rules, enabled) {
 
 ; ---------------- 快捷键 ----------------
 ApplyHotkey(hk) {
-    global g_hk, g_hkObj, core
+    global g_hk, g_hkObj, core, iniFile
     hk := Trim(hk)
     if (hk = "")
         hk := "^!k"
     if (!RegExMatch(hk, "[\^\!\+\#]"))
         throw Error("快捷键必须至少含一个修饰键 (Ctrl/Alt/Shift/Win)")
-    newObj := Hotkey(hk, (*) => SetBlocked(!core.blocked), "On")
-    if (g_hk != "" && g_hk != hk) {
-        removed := false
-        if (IsObject(g_hkObj)) {
-            try {
-                g_hkObj.Delete()
-                removed := true
-            }
-        }
-        if (!removed)
-            try Hotkey(g_hk, , "Off")
+    oldHK := g_hk
+    try {
+        Hotkey(hk, (*) => SetBlocked(!core.blocked), "On")
+        IniWrite(hk, iniFile, "hotkey", "combo")
+        if (oldHK != "" && oldHK != hk)
+            Hotkey(oldHK, , "Off")
+    } catch as e {
+        if (hk != oldHK)
+            try Hotkey(hk, , "Off")
+        try Hotkey(oldHK, , "On")
+        try IniWrite(oldHK, iniFile, "hotkey", "combo")
+        throw e
     }
-    g_hkObj := newObj
+    g_hkObj := 0
     g_hk := hk
-    IniWrite(hk, iniFile, "hotkey", "combo")
     SyncChord()
     SyncShortcutHotkey()
 }
@@ -704,51 +714,7 @@ SyncShortcutHotkey() {
 }
 
 HotkeyPretty(hk) {
-    s := ""
-    if InStr(hk, "^")
-        s .= "Ctrl+"
-    if InStr(hk, "!")
-        s .= "Alt+"
-    if InStr(hk, "+")
-        s .= "Shift+"
-    if InStr(hk, "#")
-        s .= "Win+"
-    return s StrUpper(RegExReplace(hk, "[\^\!\+\#]"))
-}
-
-CaptureHotkeyFlow(*) {
-    TrayTip("请按下新的快捷键组合 (必须含 Ctrl/Alt/Shift/Win 至少一个,`nEsc 取消, 10 秒内有效)", "键盘开关: 自定义快捷键", 0)
-    ih := InputHook("L1 T10")
-    ih.KeyOpt("{All}", "E")
-    ih.KeyOpt("{LCtrl}{RCtrl}{LAlt}{RAlt}{LShift}{RShift}{LWin}{RWin}", "-E")
-    ih.Start()
-    ih.Wait()
-    if (ih.EndReason = "Timeout" || (ih.EndReason = "EndKey" && StrLower(ih.EndKey) = "esc")) {
-        TrayTip("已取消, 快捷键未修改", "键盘开关")
-        return
-    }
-    mods := ""
-    if (GetKeyState("LCtrl", "P") || GetKeyState("RCtrl", "P"))
-        mods .= "^"
-    if (GetKeyState("LAlt", "P") || GetKeyState("RAlt", "P"))
-        mods .= "!"
-    if (GetKeyState("LShift", "P") || GetKeyState("RShift", "P"))
-        mods .= "+"
-    if (GetKeyState("LWin", "P") || GetKeyState("RWin", "P"))
-        mods .= "#"
-    if (mods = "") {
-        TrayTip("已拒绝: 快捷键必须至少含一个修饰键, 单键会导致打字误触发", "键盘开关", 3)
-        UpdateGuiHkText()
-        return
-    }
-    newHK := mods ih.EndKey
-    try {
-        ApplyHotkey(newHK)
-        TrayTip("快捷键已设置: " HotkeyPretty(newHK), "键盘开关")
-    } catch {
-        TrayTip("组合 " newHK " 无法注册, 快捷键未修改", "键盘开关", 3)
-    }
-    UpdateGuiHkText()
+    return ShortcutCapture.Pretty(hk)
 }
 
 ; ---------------- 扫描 / 豁免 ----------------
@@ -813,6 +779,7 @@ ScanTimer() {
 }
 
 ScanKeysFlow(*) {
+    CancelShortcutCapture()
     global AHI, core, g_scanGui, g_scanLb, g_scanMap, g_scanOrder, g_scanDirty
     if (core.ids.Length = 0) {
         TrayTip("内置键盘未识别, 无法扫描", "键盘开关", 3)
@@ -838,10 +805,10 @@ ScanKeysFlow(*) {
     g_scanGui := Gui("", "扫描内置键盘按键")
     g_scanGui.MarginX := 14
     g_scanGui.MarginY := 12
-    g_scanGui.SetFont("s9")
-    g_scanGui.AddText("w300", "请逐个按一遍内置键盘上的按键 (含滚轮/多媒体键),`n按过的键会实时出现在列表里。")
+    AppTheme.Setup(g_scanGui)
+    g_scanGui.AddText("w360", "请按下想保留的内置按键，例如音量键。`n扫描期间按键正常输入，完成后选择需要保留的项。")
     g_scanLb := g_scanGui.AddListBox("w300 r10")
-    g_scanGui.AddButton("w300 h32 y+10", "完成扫描, 选择要豁免的键").OnEvent("Click", FinishScan)
+    g_scanGui.AddButton("w360 h36 y+10", "完成扫描并选择按键").OnEvent("Click", FinishScan)
     g_scanGui.AddButton("w300 h28", "取消").OnEvent("Click", CancelScan)
     g_scanGui.OnEvent("Close", CancelScan)
     g_scanGui.Show()
@@ -870,7 +837,7 @@ FinishScan(*) {
     codes := g_scanOrder.Clone()
     EndScan()
     if (codes.Length = 0) {
-        TrayTip("没有按任何键, 豁免清单未修改", "键盘开关")
+        TrayTip("未检测到按键，保留列表未修改", "键盘开关")
         return
     }
     ShowExemptPicker(codes)
@@ -878,17 +845,17 @@ FinishScan(*) {
 
 ShowExemptPicker(codes) {
     exempt := ExemptMap()
-    pg := Gui("", "选择要豁免的键")
+    pg := Gui("", "暂停时仍可使用的按键")
     pg.MarginX := 14
     pg.MarginY := 12
-    pg.SetFont("s9")
-    pg.AddText("w300", "勾选 = 截断键盘时该键照常工作 (豁免)`n(紧急组合键永远受保护)")
+    AppTheme.Setup(pg)
+    pg.AddText("w360", "勾选后，暂停内置键盘时这些键仍可使用。`n切换快捷键不受此列表影响。")
     boxes := []
     for _, code in codes {
-        chk := pg.AddCheckBox(Format("w300 y+6 Checked{}", exempt.Has(code) ? 1 : 0), ScanKeyName(code) "    (code " code ")")
+        chk := pg.AddCheckBox(Format("w360 y+6 Checked{}", exempt.Has(code) ? 1 : 0), ScanKeyName(code))
         boxes.Push({code: code, chk: chk})
     }
-    pg.AddButton("w300 h32 y+10", "保存豁免").OnEvent("Click", SaveExemptClick.Bind(boxes, pg))
+    pg.AddButton("w360 h36 y+10", "保存保留按键").OnEvent("Click", SaveExemptClick.Bind(boxes, pg))
     pg.AddButton("w300 h28", "取消").OnEvent("Click", (ctrl, *) => ctrl.Gui.Destroy())
     pg.Show()
 }
@@ -912,7 +879,7 @@ SaveExemptClick(boxes, pg, ctrl, info) {
     IniWrite(csv, iniFile, "exempt", "codes")
     pg.Destroy()
     ApplyExempt()
-    TrayTip("豁免已保存: " checked.Count " 个键在截断时照常工作", "键盘开关")
+    TrayTip("保留列表已保存：" checked.Count " 个键在暂停输入时仍可使用", "键盘开关")
     LogMsg("exempt saved: " csv)
 }
 
@@ -920,91 +887,19 @@ ClearExempt(*) {
     global iniFile
     IniWrite("", iniFile, "exempt", "codes")
     ApplyExempt()
-    TrayTip("豁免清单已清空", "键盘开关")
+    TrayTip("保留按键列表已清空", "键盘开关")
     LogMsg("exempt cleared")
 }
 
 ; ---------------- 面板 ----------------
-ShowGui(*) {
-    global g_gui, g_ctlStatus, g_ctlHk, g_ctlExempt, g_ctlAuto, g_ctlGestures
-    if (!IsObject(g_gui)) {
-        g_gui := Gui("", "内置键盘开关")
-        g_gui.MarginX := 16
-        g_gui.MarginY := 14
-        g_gui.SetFont("s11 w700")
-        g_ctlStatus := g_gui.AddText("w330 Center", "")
-        g_gui.SetFont("s9 w400 norm")
-        g_ctlHk := g_gui.AddText("w330 Center", "")
-        g_ctlExempt := g_gui.AddText("w330 Center", "")
-        g_gui.AddButton("w330 h34 y+12", "切换内置键盘").OnEvent("Click", (*) => SetBlocked(!core.blocked))
-        g_gui.AddButton("w158 h32 y+10 Section", "只留外接").OnEvent("Click", (*) => SetBlocked(true))
-        g_gui.AddButton("w158 h32 ys x+14", "恢复内置").OnEvent("Click", (*) => SetBlocked(false))
-        g_gui.AddButton("xm w158 h32 y+10 Section", "扫描按键(豁免)…").OnEvent("Click", ScanKeysFlow)
-        g_gui.AddButton("w158 h32 ys x+14", "自定义快捷键…").OnEvent("Click", CaptureHotkeyFlow)
-        g_gui.AddButton("xm w158 h32 y+10 Section", "重新识别内置键盘").OnEvent("Click", ReidentifyFlow)
-        g_gui.AddButton("w158 h32 ys x+14", "清除全部豁免").OnEvent("Click", ClearExempt)
-        g_ctlAuto := g_gui.AddCheckBox("xm w158 h26 y+10 Section Checked" (IsAutostart() ? 1 : 0), "开机自动启动")
-        g_ctlAuto.OnEvent("Click", OnAutoClick)
-        g_gui.AddButton("w158 h26 ys x+14", "紧急恢复键盘").OnEvent("Click", EmergencyRelease)
-        g_gui.AddButton("xm w330 h34 y+12", "坏键替代设置（长按 / 双击）…").OnEvent("Click", ShowGestureSettings)
-        g_ctlGestures := g_gui.AddText("xm w330 r2 y+8", "")
-        g_gui.OnEvent("Close", (g) => g.Hide())
-    }
-    UpdateGui()
-    g_gui.Show()
-}
-
-UpdateGui(*) {
-    global g_gui, g_ctlStatus, core, g_ctlGestures, g_gesturesEnabled, g_gestureRules
-    if (!IsObject(g_gui))
-        return
-    if (core.mode = "error") {
-        g_ctlStatus.Text := "内置键盘：释放状态未确认（请紧急恢复）"
-        g_ctlStatus.SetFont("cC00000")
-    } else if (core.ids.Length = 0) {
-        g_ctlStatus.Text := "内置键盘：未识别（重试中）"
-        g_ctlStatus.SetFont("cB8860B")
-    } else if (core.blocked) {
-        g_ctlStatus.Text := "内置键盘：已截断（" core.ids.Length " 个设备）"
-        g_ctlStatus.SetFont("cC00000")
-    } else {
-        g_ctlStatus.Text := "内置键盘：已恢复（" core.ids.Length " 个设备）"
-        g_ctlStatus.SetFont("c1A7A1A")
-    }
-    g_ctlStatus.Redraw()
-    UpdateGuiHkText()
-    n := ExemptCount()
-    g_ctlExempt.Text := n > 0 ? "豁免按键: " n " 个（截断时照常工作）" : "豁免按键: 无"
-    want := IsAutostart() ? 1 : 0
-    if (g_ctlAuto.Value != want)
-        g_ctlAuto.Value := want
-    paused := g_gesturesEnabled && core.mode = "pass" && core.ids.Length > 0
-    g_ctlGestures.Text := "坏键替代：" (paused ? "处理已暂停，请重新应用设置" : g_gesturesEnabled ? "已启用，" g_gestureRules.Length " 条规则" : "已关闭")
-        . "`n仅内置键盘；截断期间暂停"
-}
-
-UpdateGuiHkText(*) {
-    global g_gui, g_ctlHk, g_hk
-    if (!IsObject(g_gui))
-        return
-    g_ctlHk.Text := "快捷键: " HotkeyPretty(g_hk) "（内置键盘截断时同组合也可切换）"
-}
-
-OnAutoClick(*) {
-    if (IsAutostart())
-        RemoveAutostart()
-    else
-        SetAutostart()
-    UpdateGui()
-}
-
 ; ---------------- 重新识别 / 应急 ----------------
 ReidentifyFlow(*) {
+    CancelShortcutCapture()
     global core, g_desiredBlocked, g_scanGui, iniFile
     if IsObject(g_scanGui)
         EndScan(false)
     if !core.Reset() {
-        TrayTip("旧订阅未成功清理，请先紧急恢复", "键盘开关", 3)
+        TrayTip("旧订阅未成功清理，请使用“停止处理并退出”", "键盘开关", 3)
         return
     }
     IniWrite("", iniFile, "device", "handles")
@@ -1020,10 +915,18 @@ ReidentifyFlow(*) {
 }
 
 EmergencyRelease(*) {
+    global g_captureActive, g_captureCandidate
+    g_captureCandidate := ""
+    if g_captureActive {
+        ; End recording without briefly restoring the old blocking state.
+        g_captureActive := false
+        SetTimer(ShortcutCaptureTick, 0)
+        try g_captureHook.Stop()
+    }
     core.Panic()
     ReleaseModifiers()
     LogMsg("EMERGENCY RELEASE")
-    TrayTip("已强制放行全部键盘" , "键盘开关")
+    TrayTip("已尝试停止输入处理，程序即将退出" , "键盘开关")
     SetTimer(() => ExitApp(), -800)
 }
 
@@ -1032,6 +935,7 @@ DoCleanup() {
     if (g_exiting)
         return
     g_exiting := true
+    CancelShortcutCapture()
     try core.Panic()
     try ReleaseModifiers()
     ClearDaemonPid()
@@ -1046,18 +950,18 @@ BuildTray() {
     A_TrayMenu.Add("状态面板", (*) => ShowGui())
     A_TrayMenu.Add()
     A_TrayMenu.Add("切换内置键盘", (*) => SetBlocked(!core.blocked))
-    A_TrayMenu.Add("只留外接 (截断内置)", (*) => SetBlocked(true))
-    A_TrayMenu.Add("恢复内置键盘", (*) => SetBlocked(false))
+    A_TrayMenu.Add("暂停内置键盘输入", (*) => SetBlocked(true))
+    A_TrayMenu.Add("允许内置键盘输入", (*) => SetBlocked(false))
     A_TrayMenu.Add()
-    A_TrayMenu.Add("扫描按键(豁免)…", ScanKeysFlow)
-    A_TrayMenu.Add("自定义快捷键…", CaptureHotkeyFlow)
-    A_TrayMenu.Add("坏键替代设置（长按 / 双击）…", ShowGestureSettings)
+    A_TrayMenu.Add("选择暂停时保留的按键…", ScanKeysFlow)
+    A_TrayMenu.Add("录制切换快捷键…", CaptureHotkeyFlow)
+    A_TrayMenu.Add("按键替代设置…", ShowGestureSettings)
     A_TrayMenu.Add("重新识别内置键盘", ReidentifyFlow)
-    A_TrayMenu.Add("清除全部豁免", ClearExempt)
+    A_TrayMenu.Add("清空保留按键列表", ClearExempt)
     A_TrayMenu.Add("开机自动启动", ToggleAutostart)
     A_TrayMenu.Add()
-    A_TrayMenu.Add("紧急恢复键盘 (强制放行)", EmergencyRelease)
-    A_TrayMenu.Add("退出 (自动放行内置键盘)", (*) => ExitApp())
+    A_TrayMenu.Add("输入异常：停止处理并退出", EmergencyRelease)
+    A_TrayMenu.Add("退出并停止输入处理", (*) => ExitApp())
     A_TrayMenu.Default := "状态面板"
     if (IsAutostart())
         A_TrayMenu.Check("开机自动启动")
@@ -1068,13 +972,13 @@ UpdateTrayIcon(*) {
     global core
     if (core.mode = "error") {
         TraySetIcon("shell32.dll", 78)
-        A_IconTip := "键盘开关：释放未确认，请紧急恢复"
+        A_IconTip := "键盘开关：处理状态异常，请停止处理并退出"
     } else if (core.ids.Length = 0) {
         TraySetIcon("shell32.dll", 78)
         A_IconTip := "键盘开关：未识别到内置键盘"
     } else if (core.blocked) {
         TraySetIcon("shell32.dll", 109)
-        A_IconTip := "键盘开关：内置键盘已截断"
+        A_IconTip := "键盘开关：内置键盘已暂停输入"
     } else {
         TraySetIcon("setupapi.dll", 2)
         A_IconTip := "键盘开关：内置键盘正常"

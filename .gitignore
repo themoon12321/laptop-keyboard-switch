@@ -11,6 +11,7 @@ __pycache__/
 app/KeyboardToggle.ini
 app/KeyGestures.ini
 dist/
+.artifacts/
 /_devfilter.ps1
 /_unfilt2.ps1
 app/driver/mouse-filter.ps1

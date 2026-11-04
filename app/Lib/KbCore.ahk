@@ -43,6 +43,12 @@ class KbCore {
         this.modsDown := Map()
         this.armed := true
     }
+    static ModifierPartner(code) {
+        return Map(29, 285, 285, 29, 42, 54, 54, 42, 56, 312, 312, 56, 347, 348, 348, 347).Get(code, 0)
+    }
+    ChordUses(code) {
+        return this.chord.Has(code) || this.chord.Has(KbCore.ModifierPartner(code))
+    }
     SetOnChord(fn) {
         this.onChord := fn
     }
@@ -280,7 +286,7 @@ class KbCore {
             return
         }
         this.TrackChord(code, state)
-        if (this.exempt.Has(code) && !this.chord.Has(code) && code != this.chordKey) {
+        if (this.exempt.Has(code) && !this.ChordUses(code) && code != this.chordKey) {
             try {
                 this.AHI.SendKeyEvent(id, code, state)
                 this.statReinject++
@@ -301,7 +307,7 @@ class KbCore {
     TrackChord(code, state) {
         if !this.chordKey
             return
-        if this.chord.Has(code) {
+        if this.ChordUses(code) {
             this.modsDown[code] := (state = 1)
             return
         }
@@ -312,7 +318,7 @@ class KbCore {
             return
         }
         for sc, _ in this.chord
-            if !this.modsDown.Get(sc, false)
+            if (!this.modsDown.Get(sc, false) && !this.modsDown.Get(KbCore.ModifierPartner(sc), false))
                 return
         if this.armed {
             this.armed := false

@@ -263,6 +263,10 @@ f13.Stroke(1, 37, 1)
 r2 := fire.n
 Check(r1 = 1 && r2 = 2, "T13 emergency chord fires once per press")
 Prog("T13 done")
+f13.Stroke(1, 37, 0)
+f13.Stroke(1, 29, 0), f13.Stroke(1, 56, 0)
+f13.Stroke(1, 285, 1), f13.Stroke(1, 312, 1), f13.Stroke(1, 37, 1)
+Check(fire.n = 3, "T13b right-side modifiers can restore blocked keyboard")
 
 Prog("T14 start")
 f14 := FakeAHI()
