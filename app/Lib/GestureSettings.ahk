@@ -1,4 +1,5 @@
 #Include %A_LineFile%\..\AppTheme.ahk
+#Include %A_LineFile%\..\KeyboardPicker.ahk
 class GestureSettings {
     static Defaults() {
         return [
@@ -54,6 +55,7 @@ class GestureSettingsWindow {
     __New(rules, enabled, onSave) {
         this.rules := rules.Clone(), this.onSave := onSave
         this.editing := 0, this.dirty := false, this.loading := true
+        this.sourceCode := 0, this.targetCode := 0, this.picker := 0
         this.window := Gui(, "按键替代设置")
         g := this.window
         AppTheme.Setup(g)
@@ -61,7 +63,7 @@ class GestureSettingsWindow {
         AppTheme.Text(g, "x24 y60 w580 h24", "用好用的按键代替坏键，只对内置键盘生效。", 10, "64748B")
         AppTheme.Card(g, 24, 100, 592, 58)
         this.enabled := g.AddCheckBox("x42 y118 w550 h24 BackgroundFFFFFF Checked" (enabled ? 1 : 0), "启用按键替代")
-        this.list := g.AddListView("x24 y176 w592 h126 -Multi", ["按哪个键", "操作", "输入哪个键", "时间（毫秒）"])
+        this.list := g.AddListView("x24 y176 w592 h126 -Multi", ["代替键", "操作", "坏键（输入）", "时间（毫秒）"])
         for col in [1, 2, 3, 4]
             this.list.ModifyCol(col, col = 4 ? 140 : 144)
         this.list.OnEvent("ItemSelect", this.Select.Bind(this))
@@ -69,24 +71,25 @@ class GestureSettingsWindow {
         this.deleteButton := AppTheme.Button(g, "x154 y312 w120 h32", "删除规则", this.Delete.Bind(this))
         AppTheme.Card(g, 24, 360, 592, 152)
         this.editorTitle := AppTheme.Text(g, "x42 y374 w530 h24 BackgroundFFFFFF", "编辑规则", 11, "17233B", 600)
-        AppTheme.Text(g, "x42 y408 w118 h20 BackgroundFFFFFF", "按哪个键", 9, "64748B")
+        AppTheme.Text(g, "x42 y408 w118 h20 BackgroundFFFFFF", "代替键（用来触发）", 9, "64748B")
         AppTheme.Text(g, "x180 y408 w112 h20 BackgroundFFFFFF", "操作", 9, "64748B")
-        AppTheme.Text(g, "x312 y408 w118 h20 BackgroundFFFFFF", "输入哪个键", 9, "64748B")
+        AppTheme.Text(g, "x312 y408 w118 h20 BackgroundFFFFFF", "坏键（要输入的键）", 9, "64748B")
         this.timeLabel := AppTheme.Text(g, "x450 y408 w150 h20 BackgroundFFFFFF", "长按时长（毫秒）", 9, "64748B")
-        this.source := g.AddEdit("x42 y434 w118 h28", "")
+        this.source := AppTheme.Button(g, "x42 y434 w118 h30", "选择代替键…", this.OpenPicker.Bind(this, "source"))
         this.trigger := g.AddDropDownList("x180 y434 w112 Choose1", ["长按", "双击"])
-        this.target := g.AddEdit("x312 y434 w118 h28", "")
+        this.target := AppTheme.Button(g, "x312 y434 w118 h30", "选择坏键…", this.OpenPicker.Bind(this, "target"))
         this.delay := g.AddEdit("x450 y434 w146 h28 Number", "600")
         g.AddUpDown("Range150-10000", 600)
         this.duration := AppTheme.Text(g, "x42 y478 w554 h22 BackgroundFFFFFF", "", 9, "64748B")
         this.feedback := AppTheme.Text(g, "x24 y528 w592 h40", "", 9, "64748B")
         AppTheme.Button(g, "x320 y580 w140 h36 Default", "保存并应用", this.Save.Bind(this))
-        AppTheme.Button(g, "x476 y580 w140 h36", "取消", (*) => g.Destroy())
+        AppTheme.Button(g, "x476 y580 w140 h36", "取消", this.Close.Bind(this))
         AppTheme.Text(g, "x24 y580 w278 h36", "短按保留原键。快捷键优先保留原操作。", 9, "64748B")
-        for ctrl in [this.source, this.target, this.trigger, this.delay]
+        for ctrl in [this.trigger, this.delay]
             ctrl.OnEvent("Change", this.Changed.Bind(this))
         this.enabled.OnEvent("Click", (*) => this.Hint("开关修改将在保存后生效。"))
-        g.OnEvent("Close", (*) => g.Destroy())
+        g.OnEvent("Close", this.Close.Bind(this))
+        g.OnEvent("Escape", this.Close.Bind(this))
         this.loading := false
         this.Refresh(this.rules.Length ? 1 : 0)
     }
@@ -109,25 +112,25 @@ class GestureSettingsWindow {
         try seconds := Format("{:.2f}", Integer(this.delay.Value) / 1000)
         catch
             seconds := "—"
-        this.duration.Text := "当前时间：" seconds " 秒 · 可输入 150–10000 毫秒。按键名示例：X、3、Enter、SC034。"
+        this.duration.Text := "当前时间：" seconds " 秒 · 可输入 150–10000 毫秒。点击按键按钮，用鼠标选择。"
     }
     LoadRow(row) {
         this.loading := true
         this.editing := row
         if row {
             rule := this.rules[row]
-            this.source.Value := GetKeyName("SC" Format("{:03X}", rule.source))
-            this.target.Value := GetKeyName("SC" Format("{:03X}", rule.target))
+            this.sourceCode := rule.source, this.targetCode := rule.target
             this.trigger.Choose(rule.mode = "hold" ? 1 : 2)
             this.delay.Value := rule.delay
             this.editorTitle.Text := "编辑规则 · " GestureSettings.Name(rule.source) " → " GestureSettings.Name(rule.target)
         } else {
-            this.source.Value := "", this.target.Value := ""
+            this.sourceCode := 0, this.targetCode := 0
             this.trigger.Choose(1), this.delay.Value := "600"
             this.editorTitle.Text := "新规则"
         }
         this.deleteButton.Enabled := row > 0
         this.dirty := false, this.loading := false
+        this.UpdateKeyButtons()
         this.Describe()
     }
     Refresh(row := 0) {
@@ -139,7 +142,7 @@ class GestureSettingsWindow {
             this.list.Modify(row, "Select Focus Vis")
         this.loading := false
         this.LoadRow(row)
-        this.Hint(this.rules.Length ? "选中规则即可修改按键和时间，保存后生效。" : "暂无规则。填写下面的按键和时间，再保存即可。")
+        this.Hint(this.rules.Length ? "选中规则即可修改按键和时间，保存后生效。" : "暂无规则。点击按钮选择代替键和坏键，设置时间后保存。")
     }
     Select(ctrl, row, selected) {
         if (this.loading || !selected || row < 1 || row > this.rules.Length || row = this.editing)
@@ -158,7 +161,9 @@ class GestureSettingsWindow {
         if !this.dirty
             return true
         try {
-            rule := {source: GetKeySC(Trim(this.source.Value)), target: GetKeySC(Trim(this.target.Value)),
+            if (!this.sourceCode || !this.targetCode)
+                throw Error("请先选择代替键和坏键。")
+            rule := {source: this.sourceCode, target: this.targetCode,
                 mode: this.trigger.Value = 1 ? "hold" : "double", delay: Integer(this.delay.Value)}
             rules := this.rules.Clone()
             if this.editing
@@ -193,7 +198,7 @@ class GestureSettingsWindow {
         this.loading := false
         this.LoadRow(0)
         this.source.Focus()
-        this.Hint("填写新规则，完成后直接保存；再次添加可继续编辑下一条。")
+        this.Hint("用鼠标选择代替键和坏键，完成后直接保存；再次添加可继续编辑下一条。")
     }
     Delete(*) {
         if this.editing {
@@ -209,9 +214,38 @@ class GestureSettingsWindow {
             return
         try {
             if this.onSave.Call(this.rules, this.enabled.Value = 1)
-                this.window.Destroy()
+                this.Close()
         } catch as e {
             this.Hint("未保存：" e.Message, true)
         }
+    }
+    UpdateKeyButtons() {
+        this.source.Text := this.sourceCode ? GestureSettings.Name(this.sourceCode) " …" : "选择代替键…"
+        this.target.Text := this.targetCode ? GestureSettings.Name(this.targetCode) " …" : "选择坏键…"
+    }
+    SetKey(role, code) {
+        if (!KeyboardPicker.Supported(code) || (role != "source" && role != "target"))
+            return false
+        if (role = "source")
+            this.sourceCode := code
+        else
+            this.targetCode := code
+        this.UpdateKeyButtons()
+        this.Changed()
+        return true
+    }
+    OpenPicker(role, *) {
+        if (IsObject(this.picker) && !this.picker.closed) {
+            this.picker.Show()
+            return
+        }
+        current := role = "source" ? this.sourceCode : this.targetCode
+        this.picker := KeyboardPicker(this.window, role, current, (code) => this.SetKey(role, code))
+        this.picker.Show()
+    }
+    Close(*) {
+        if (IsObject(this.picker) && !this.picker.closed)
+            this.picker.Close()
+        this.window.Destroy()
     }
 }

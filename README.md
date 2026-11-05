@@ -24,7 +24,8 @@
 
 - **暂停内置输入 / 允许内置输入**：使用外接键盘时暂停笔记本自带键盘，避免误触；`Ctrl+Alt+K` 为默认切换快捷键。
 - **录制组合键**：面板显示“正在录制”和倒计时，实时显示 Ctrl / Alt / Shift / Win 与主键组合。松开后显示“待保存”，点击“保存快捷键”才生效。Esc、取消、超时或离开面板会结束录制。录制期间临时允许内置输入并暂停旧切换快捷键，结束后恢复原状态。
-- **管理替代规则**：选择已有规则直接编辑；新规则点“添加规则”。配置按哪个键、长按/双击、输入哪个键和触发时间；每条规则独立设置 **150–10000 毫秒**，旁边显示对应秒数。
+- **管理替代规则**：选择已有规则直接编辑；新规则点“添加规则”。配置代替键（用来触发）、长按/双击、坏键（要输入的键）和触发时间；每条规则独立设置 **150–10000 毫秒**，旁边显示对应秒数。
+- **鼠标选择按键**：点击“代替键”或“坏键”按钮，打开完整键盘示意，选择键帽再确认，不需要实际按下坏键或输入键名。包括字母、符号、F1–F12、方向/编辑区和数字小键盘；两处选键方式相同。取消不改变原值；暂不支持的键置灰。符号以物理键位选择，例如 `/` 和 `?` 共用一个键。
 - 修改后直接点击 **保存并应用**。切换规则时保留合法的编辑内容；无效时间会在面板提示，阻止保存。取消不改变已经生效的配置。
 - **暂停时保留的按键**：例如暂停内置键盘时仍想使用音量键，点击“选择保留按键”，按下目标键并勾选保存；不用理解扫描码或“豁免”。
 - **输入异常？停止处理并退出**：尝试释放本项目的输入订阅并退出程序，与正常允许输入的按钮区分。不能修复任意其他驱动故障。
@@ -63,6 +64,7 @@
 .\app\AutoHotkey\AutoHotkey64.exe /ErrorStdOut tests\sim.ahk
 .\app\AutoHotkey\AutoHotkey64.exe /ErrorStdOut tests\gestures.ahk
 .\app\AutoHotkey\AutoHotkey64.exe /ErrorStdOut tests\shortcut-capture.ahk
+.\app\AutoHotkey\AutoHotkey64.exe /ErrorStdOut tests\keyboard-picker.ahk
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\dryrun.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\install-state.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\install-lifecycle.ps1

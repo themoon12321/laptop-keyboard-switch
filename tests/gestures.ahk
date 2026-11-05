@@ -114,12 +114,11 @@ Check(dialog.list.GetCount() = 3 && dialog.enabled.Value = 1, "settings panel bu
 dialog.delay.Value := "450"
 dialog.Changed()
 Check(dialog.CommitEditor() && dialog.rules[1].delay = 450, "time edit commits without separate update button")
-dialog.source.Value := "v"
-dialog.target.Value := "b"
-dialog.Changed()
+dialog.SetKey("source", GetKeySC("v"))
+dialog.SetKey("target", GetKeySC("b"))
 Check(dialog.CommitEditor() && dialog.rules.Length = 3 && dialog.rules[1].source = GetKeySC("v"), "editing source replaces selected rule rather than adding duplicate")
 dialog.NewRule()
-dialog.source.Value := "a", dialog.target.Value := "s", dialog.delay.Value := "750"
+dialog.SetKey("source", GetKeySC("a")), dialog.SetKey("target", GetKeySC("s")), dialog.delay.Value := "750"
 dialog.Changed()
 Check(dialog.CommitEditor() && dialog.rules.Length = 4 && dialog.rules[4].delay = 750, "new rule accepts custom time")
 dialog.delay.Value := "0"

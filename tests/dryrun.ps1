@@ -157,6 +157,10 @@ IntegrationSelfTest() {
         settingsPreview.window.Show("Hide AutoSize")
         settingsPreview.delay.Value := "450", settingsPreview.Changed()
         CaptureTestWindow(settingsPreview.window, "PREVIEW_PATH\settings.bmp")
+        keyPreview := KeyboardPicker(settingsPreview.window, "target", GetKeySC("z"), (*) => 0)
+        keyPreview.window.Show("Hide AutoSize")
+        CaptureTestWindow(keyPreview.window, "PREVIEW_PATH\keyboard-picker.bmp")
+        keyPreview.Close()
         settingsPreview.window.Destroy()
 '@
         $testFunctions=$testFunctions.Replace('; PREVIEW_INSERT',$render.Replace('PREVIEW_PATH',$preview))
