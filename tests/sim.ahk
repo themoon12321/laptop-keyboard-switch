@@ -38,6 +38,9 @@ class FakeAHI {
     __New() {
         this.devs := Map()
         this.subs := Map()
+        this.keySubs := Map()
+        this.rawPassed := []
+        this.failKeyUnsub := false
         this.sent := []
         this.failIds := Map()
         this.stateCalls := []
@@ -68,9 +71,22 @@ class FakeAHI {
             this.subs.Delete(id)
     }
     SendKeyEvent(id, code, state) {
+        if (code = 0x177 || code = 0x178)
+            throw Error("Do not know how to handle ScanCode of " (code - 256))
         if this.failSend
             throw Error("simulated output failure")
         this.sent.Push({id: id, code: code, state: state})
+    }
+    SubscribeKey(id, code, block, cb, concurrent := false) {
+        this.keySubs[id ":" code] := {block: block, callback: cb}
+        this.filterEnabled := true
+    }
+    UnsubscribeKey(id, code) {
+        if this.failKeyUnsub
+            throw Error("simulated per-key cleanup failure")
+        key := id ":" code
+        if this.keySubs.Has(key)
+            this.keySubs.Delete(key)
     }
     SetState(s) {
         if (!s && this.failRelease)
@@ -79,7 +95,15 @@ class FakeAHI {
         this.filterEnabled := s
     }
     Stroke(id, code, state) {
-        if (this.filterEnabled && this.subs.Has(id))
+        if !this.filterEnabled
+            return
+        key := id ":" code
+        if this.keySubs.Has(key) {
+            mapping := this.keySubs[key]
+            if !mapping.block
+                this.rawPassed.Push({id: id, code: code, state: state})
+            mapping.callback.Call(state)
+        } else if this.subs.Has(id)
             this.subs[id].Call(code, state)
     }
     LastState() {
@@ -358,6 +382,28 @@ f22.Stroke(1, 30, 1)
 Check(c22.needStop && f22.subs.Count = 1, "T22 output failure schedules release outside the driver callback")
 c22.TickGestures()
 Check(c22.mode = "pass" && f22.subs.Count = 0 && !f22.filterEnabled, "T22b deferred release stops failed gesture processing")
+
+f23 := FakeAHI()
+f23.AddDev(1, "ACPI\internal")
+f23.AddDev(2, "USB\external")
+c23 := NewCore(f23)
+c23.Identify(f23.GetDeviceList())
+c23.ConfigureGestures([{source: 45, target: 44, mode: "hold", delay: 600}], true)
+Check(c23.Unblock() && f23.keySubs.Count = 2 && !f23.keySubs.Has("2:376"), "T23 brightness passthrough is limited to the internal keyboard")
+for code in [0x177, 0x178] {
+    f23.Stroke(1, code, 1)
+    f23.Stroke(1, code, 0)
+}
+Check(f23.rawPassed.Length = 4 && f23.sent.Length = 0 && !c23.needStop && c23.mode = "remap", "T24 brightness presses and releases pass without reinjection or stopping gestures")
+f23.Stroke(1, 45, 1)
+f23.Stroke(1, 45, 0)
+Check(f23.SentCount(45, 1) = 1 && f23.SentCount(45, 0) = 1, "T25 replacement source still passes short taps after brightness input")
+Check(c23.Block() && f23.keySubs.Count = 0, "T26 pausing internal input removes remap-only passthrough")
+c23.Unblock()
+f23.failKeyUnsub := true
+Check(!c23.Stop() && c23.brightnessSubs.Count = 1 && !f23.filterEnabled, "T27 failed passthrough cleanup is retained and filtering is disabled")
+f23.failKeyUnsub := false
+Check(c23.Stop() && f23.keySubs.Count = 0 && c23.brightnessSubs.Count = 0, "T28 retry removes remaining passthrough subscriptions")
 
 g_msgs .= "`nTOTAL: " g_pass " passed, " g_fail " failed`n"
 FileAppend(g_msgs, outFile, "UTF-8")

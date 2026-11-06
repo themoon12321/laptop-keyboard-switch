@@ -9,6 +9,7 @@ class KbCore {
         this.ids := []
         this.handles := []
         this.subs := Map() ; id -> verified handle, retained on cleanup failure
+        this.brightnessSubs := Map() ; id -> original-event passthrough scan codes
         this.blocked := false
         this.mode := "pass"
         this.exempt := Map()
@@ -160,6 +161,19 @@ class KbCore {
             }
         }
         this.subs := failed
+        failedBrightness := Map()
+        for id, codes in this.brightnessSubs {
+            for code in codes {
+                try this.AHI.UnsubscribeKey(id, code)
+                catch as e {
+                    if !failedBrightness.Has(id)
+                        failedBrightness[id] := []
+                    failedBrightness[id].Push(code)
+                    this.Log("UNSUB ERROR (id " id ", key " code "): " e.Message)
+                }
+            }
+        }
+        this.brightnessSubs := failedBrightness
         safe := true
         try this.AHI.SetState(false)
         catch as e {
@@ -169,9 +183,10 @@ class KbCore {
         this.seenDown := Map()
         this.modsDown := Map()
         this.armed := true
-        if (!safe || failed.Count) {
+        if (!safe || failed.Count || failedBrightness.Count) {
             this.mode := "error"
-            this.lastError := "release not confirmed; failed subscriptions=" failed.Count
+            this.lastError := "release not confirmed; failed device subscriptions=" failed.Count
+                . ", failed brightness devices=" failedBrightness.Count
             return false
         }
         return true
@@ -196,7 +211,21 @@ class KbCore {
             }
             ; Track attempts too: a throwing API may already have changed state.
             this.subs[id] := this.handles[i]
-            try this.AHI.SubscribeKeyboard(id, true, this.OnStroke.Bind(this, id))
+            try {
+                if (mode = "remap") {
+                    ; AHI can receive E0 77/78 but SendKeyEvent cannot encode them.
+                    ; A nonblocking key mapping takes precedence over the whole
+                    ; keyboard mapping, so AHI forwards the original stroke.
+                    this.brightnessSubs[id] := []
+                    for code in [0x177, 0x178] {
+                        if this.gestures.rules.Has(code)
+                            continue
+                        this.brightnessSubs[id].Push(code)
+                        this.AHI.SubscribeKey(id, code, false, (*) => 0, true)
+                    }
+                }
+                this.AHI.SubscribeKeyboard(id, true, this.OnStroke.Bind(this, id))
+            }
             catch as e {
                 this.lastError := "subscribe failed (id " id "): " e.Message
                 this.Log("BLOCK ERROR: " this.lastError)

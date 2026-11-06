@@ -24,7 +24,7 @@ class AutoHotInterception {
             this._subs.Delete(id)
         AutoHotInterception.Calls.Push("unsubkb:" id)
     }
-    SubscribeKey(id, code, block, cb) {
+    SubscribeKey(id, code, block, cb, concurrent := false) {
         AutoHotInterception.Calls.Push("sub:" id ":" code)
     }
     UnsubscribeKey(id, code) {
